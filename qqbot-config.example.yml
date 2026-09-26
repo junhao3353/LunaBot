@@ -1,0 +1,141 @@
+# ============================================================
+# QQ机器人 配置文件模板（qqbot-config.example.yml）
+# 使用方法：复制一份重命名为 qqbot-config.yml，然后填上你自己的配置
+# ============================================================
+
+# ---------- 连接与API ----------
+# 连接NapCat的WebSocket地址（Docker部署填 ws://napcat:6700?access_token=xxx）
+onebot_ws: "ws://127.0.0.1:6700?access_token=你的access_token"
+# DeepSeek API Key（对话+图片识别共用），去 https://platform.deepseek.com 申请
+deepseek_api_key: "sk-你的DeepSeek_API_Key"
+# 对话模型（deepseek-flash = 最新V4.1 Flash，原生多模态）
+deepseek_model: "deepseek-flash"
+# 图片识别模型（V4.1 Flash原生支持视觉，统一用deepseek-flash）
+deepseek_vision_model: "deepseek-flash"
+# 博查AI联网搜索 Key，去 https://open.bochaai.com 申请
+bocha_api_key: "sk-你的博查AI_API_Key"
+
+# ---------- 记忆与防刷屏 ----------
+# 上下文记忆轮数
+max_context_len: 8
+# 防刷屏冷却（秒）
+cooldown: 2
+
+# ---------- 白名单 ----------
+# 只回复这些群（群号，数组）
+allowed_groups: [123456789]
+# 只回复这些QQ的私聊消息
+allowed_users: [你的QQ号, 管理员QQ号]
+
+# ---------- 功能开关 ----------
+# 是否开启联网搜索
+enable_web_search: true
+# 是否在机器人上线/下线时往群里发通知
+enable_notify: false
+# 每次搜索返回的结果条数
+search_result_num: 3
+# 对话模型思考模式开关（true=先思考再回答，更准但更慢更费token；false=直接回答）
+enable_thinking_chat: true
+# 视觉模型思考模式开关（图片识别+搜索场景）
+enable_thinking_vision: true
+# 图片识别是否用语言模型代替视觉模型：true=图片活全给语言模型（V4.1原生多模态时可用），false=用单独的视觉模型
+use_chat_model_for_vision: true
+# 峰谷时段自定义显示名（发 token 查余额时显示；工作日9-12/14-18为高峰，其余+周末为空闲）
+peak_period_name: "高峰时段"
+offpeak_period_name: "空闲时段"
+# 思考强度：low(轻度快速) / high(默认增强) / max(深度推理)
+reasoning_effort: "high"
+# 下载总开关：true=正常接受下载任务（抖音/汽水/本子），false=所有下载任务拒绝不回复
+enable_download: true
+# 发送消息随机延迟（防秒回被检测）：true=开启，false=关闭（秒回）
+enable_send_delay: true
+# 随机延迟范围（秒），发送每条消息前随机等待
+send_delay_min: 3
+send_delay_max: 8
+
+# ---------- 分段回复（把AI一段话拆成多条消息发，降低人机感） ----------
+enable_split_reply: true
+split_delay_min: 1.0
+split_delay_max: 5.0
+split_max_parts: 5
+split_part_max_len: 150
+
+# ---------- 永久记忆存档（memory.json，重启不丢） ----------
+enable_memory: true
+memory_context_turns: 8
+memory_file: ""
+memory_inject_prompt: true
+enable_favor: false
+
+# ---------- 群聊旁听缓存（没@机器人的群消息也当上下文） ----------
+enable_ambient_cache: true
+ambient_max_msgs: 10
+ambient_msg_max_len: 100
+
+# ---------- AI表情包（AI自主判断是否发、发哪个） ----------
+enable_emoji: true
+emoji_dir: ""
+
+# ---------- 视频识别（群里发视频自动下载→抽帧→@时投视觉模型） ----------
+enable_video: true
+
+# ---------- 语音转文字（群里发语音→自动转写→@时投给语言模型） ----------
+enable_voice: true
+
+# ---------- AI回复转语音（edge-tts，免费在线合成） ----------
+enable_tts: true
+# 音色（晓伊女声=zh-CN-XiaoyiNeural，还有晓晓zh-CN-XiaoxiaoNeural/云希zh-CN-YunxiNeural等）
+tts_voice: "zh-CN-XiaoyiNeural"
+
+# ---------- 消息合并（防抖：连续消息合并成一次AI回复） ----------
+enable_message_merge: true
+merge_wait_seconds: 8
+merge_max_count: 8
+
+# ---------- 下载功能 ----------
+default_chapter: 1
+img_suffix: ".png"
+zip_password: ""
+max_send_mb: 60
+download_root: "本子下载"
+# 抖音ttwid（浏览器登录抖音后F12→Application→Cookies→ttwid，有效期约1-2周）
+douyin_ttwid: ""
+
+# ---------- 发送方式 ----------
+send_file_as_chat_msg: false
+upload_cleanup: true
+upload_cleanup_delay_seconds: 300
+
+# ---------- NapCat投递模式 ----------
+# A. docker-cp: napcat_container 填容器名
+# B. NAS共享目录: napcat_container 留空，napcat_host_dir/napcat_view_dir 填共享路径
+# C. 本机原生: 都留空，直接传本地路径
+napcat_container: "napcat"
+napcat_data_dir: "/app/data"
+napcat_host_dir: ""
+napcat_view_dir: "/app/data"
+
+# ---------- 系统提示词 / 人设 ----------
+# 想改人设/说话风格就改这里（整段替换）
+system_prompt: |-
+  你的名字叫「DeepSeek」，你自己的QQ号是 你的机器人QQ号。
+  群友@你的时候，就是@这个号，这是正常的。
+
+  以下是你的人设：
+  （在这里写你的人设、性格、说话风格、背景设定等）
+
+  回复技巧：
+  用中文回复
+  不使用emoji表情
+  浓缩就是精华尽量减少用词如果需要长文章科普就忽略这条
+  不要主动说自己是AI或语言模型，除非被问到
+  不知道的一定要去搜索不要直接编一个答案
+
+# ---------- 远程控制器（qq-controller） ----------
+controller:
+  ws_port: 6701
+  allowed_groups: [123456789]
+  allowed_users: [你的QQ号]
+  container_ai: "qq-bot"
+  container_napcat: "qq-napcat"
+  container_self: "qq-controller"
