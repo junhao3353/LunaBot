@@ -1,4 +1,4 @@
-#每次更改代码的时候请备份到backup
+﻿#每次更改代码的时候请备份到backup
 # 本次修改（备份见 backup\QQ2_20260904_182434.py）：
 #  1. 新增单连接消息分发器：事件全部进队列，API响应按echo交给等待方，不再丢消息
 #  2. 图片识别/DeepSeek调用改为 asyncio.to_thread，不再卡死事件循环
@@ -186,6 +186,12 @@ USE_CHAT_MODEL_FOR_VISION = False  # true=图片识别也用语言模型（V4.1�
 # ---- AI回复转语音（edge-tts，免费在线合成；true=所有AI回复都发成语音条，false=原文本逻辑） ----
 ENABLE_TTS = False             # 总开关（配置文件 enable_tts 覆盖）
 TTS_VOICE = "zh-CN-XiaoyiNeural"  # 音色：晓伊女声（配置文件 tts_voice 覆盖）
+TTS_ENGINE = "edge"            # TTS引擎：edge=微软edge-tts（免费），volc=火山引擎（豆包音色）
+# 火山引擎TTS配置（TTS_ENGINE=volc时生效）
+VOLC_API_KEY = ""            # 火山引擎API Key（新版大模型用）
+# 旧版参数（已废弃，新版用API Key）
+VOLC_CLUSTER = "volcano_mega"   # （废弃）
+VOLC_VOICE = "zh_female_vv_uranus_bigtts"  # 音色ID
 PEAK_PERIOD_NAME = "高峰"       # 高峰时段自定义显示名（配置文件可改，如"梁文峰"）
 OFFPEAK_PERIOD_NAME = "空闲"    # 空闲时段自定义显示名（配置文件可改，如"梁文谷"）
 
@@ -910,69 +916,27 @@ async def send_private_msg(websocket, user_id: int, msg: str, no_delay: bool = F
         _last_send_ts[user_id] = time.time()
 
 
-def split_reply_to_parts(text: str) -> list:
-    """把AI回复拆成多条消息的文本列表：
-    1) 先按空行分段（AI常用空行分隔两段话）
-    2) 只有一段但含换行时，按换行拆
-    3) 单段仍过长时按句末标点细拆
-    4) 代码块(```)不拆，避免拆坏
-    5) 拆分条数超过 SPLIT_MAX_PARTS（默认3）时【不拆】，整条一次发出
-    """
-    if not text:
-        return []
-    t = text.replace("\r\n", "\n").strip()
-    if not t:
-        return []
-    if "```" in t:            # 含代码块，整条发，避免拆坏
-        return [t]
-
-    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
-    if len(parts) <= 1 and "\n" in t:      # 没有空行但有多行 → 按行拆
-        parts = [p.strip() for p in t.split("\n") if p.strip()]
-
-    # 过长的段再按句末标点细拆
-    fine = []
-    for p in parts:
-        if len(p) <= SPLIT_PART_MAX_LEN:
-            fine.append(p)
-            continue
-        buf = ""
-        for seg in re.split(r"(?<=[。！？!?；;…])", p):
-            if not seg:
-                continue
-            # 单句本身就超长（整段没标点）→ 先按长度硬切
-            while len(seg) > SPLIT_PART_MAX_LEN:
-                if buf:
-                    fine.append(buf.strip())
-                    buf = ""
-                fine.append(seg[:SPLIT_PART_MAX_LEN].strip())
-                seg = seg[SPLIT_PART_MAX_LEN:]
-            if not seg:
-                continue
-            if len(buf) + len(seg) > SPLIT_PART_MAX_LEN and buf:
-                fine.append(buf.strip())
-                buf = seg
-            else:
-                buf += seg
-        if buf.strip():
-            fine.append(buf.strip())
-
-    # 条数上限：算出来超过上限就整条发，不拆（避免切太碎显得人机）
-    if SPLIT_MAX_PARTS > 0 and len(fine) > SPLIT_MAX_PARTS:
-        return [t]
-    return [p for p in fine if p.strip()]
-
 
 async def _tts_and_send(websocket, is_group: bool, chat_id: int, text: str) -> bool:
-    """edge-tts 把文本转语音并发送语音条（record消息）。失败返回False，由调用方降级为文本。
+    """TTS 把文本转语音并发送语音条（record消息）。失败返回False，由调用方降级为文本。
     生成的mp3放NapCat能读的位置，发完延迟清理。"""
     import tempfile, uuid
     try:
-        import edge_tts
         # 1. 合成mp3到临时目录
         tmp = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex[:8]}.mp3")
-        communicate = edge_tts.Communicate(text, TTS_VOICE)
-        await communicate.save(tmp)
+        if TTS_ENGINE == "volc" and VOLC_API_KEY:
+            # 火山引擎大模型TTS
+            ok = await asyncio.to_thread(_volc_tts_synthesize, text, tmp)
+            if not ok:
+                print(f"⚠️ 火山引擎TTS失败，降级edge-tts")
+                import edge_tts
+                communicate = edge_tts.Communicate(text, TTS_VOICE)
+                await communicate.save(tmp)
+        else:
+            # edge-tts
+            import edge_tts
+            communicate = edge_tts.Communicate(text, TTS_VOICE)
+            await communicate.save(tmp)
         if not os.path.isfile(tmp) or os.path.getsize(tmp) <= 0:
             print(f"⚠️ TTS合成结果为空，降级文本")
             return False
@@ -1037,17 +1001,115 @@ async def send_reply_multi(websocket, is_group: bool, chat_id: int, reply: str) 
     return parts
 
 
-async def get_reply_message(websocket, message_id: int) -> dict:
-    """通过OneBot接口获取被回复消息的完整内容"""
+def split_reply_to_parts(text: str) -> list:
+    """把AI回复拆成多条消息的文本列表：
+    1) 先按空行分段（AI常用空行分隔两段话）
+    2) 只有一段但含换行时，按换行拆
+    3) 单段仍过长时按句末标点细拆
+    4) 代码块(```)不拆，避免拆坏
+    5) 拆分条数超过 SPLIT_MAX_PARTS（默认3）时【不拆】，整条一次发出
+    """
+    if not text:
+        return []
+    t = text.replace("\r\n", "\n").strip()
+    if not t:
+        return []
+    if "```" in t:            # 含代码块，整条发，避免拆坏
+        return [t]
+
+    parts = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
+    if len(parts) <= 1 and "\n" in t:      # 没有空行但有多行 → 按行拆
+        parts = [p.strip() for p in t.split("\n") if p.strip()]
+
+    # 过长的段再按句末标点细拆
+    fine = []
+    for p in parts:
+        if len(p) <= SPLIT_PART_MAX_LEN:
+            fine.append(p)
+            continue
+        buf = ""
+        for seg in re.split(r"(?<=[。！？!?；;…])", p):
+            if not seg:
+                continue
+            # 单句本身就超长（整段没标点）→ 先按长度硬切
+            while len(seg) > SPLIT_PART_MAX_LEN:
+                if buf:
+                    fine.append(buf.strip())
+                    buf = ""
+                fine.append(seg[:SPLIT_PART_MAX_LEN].strip())
+                seg = seg[SPLIT_PART_MAX_LEN:]
+            if not seg:
+                continue
+            if len(buf) + len(seg) > SPLIT_PART_MAX_LEN and buf:
+                fine.append(buf.strip())
+                buf = seg
+            else:
+                buf += seg
+        if buf.strip():
+            fine.append(buf.strip())
+
+    # 条数上限：算出来超过上限就整条发，不拆（避免切太碎显得人机）
+    if SPLIT_MAX_PARTS > 0 and len(fine) > SPLIT_MAX_PARTS:
+        return [t]
+    return [p for p in fine if p.strip()]
+
+
+def _volc_tts_synthesize(text: str, output_path: str) -> bool:
+    """新版火山引擎大模型TTS合成mp3到本地文件。返回True=成功，False=失败。"""
+    import requests, uuid, base64, json
     try:
-        resp = await api_call(websocket, "get_msg", {"message_id": message_id}, timeout=5)
-        return resp.get("data") or {}
+        url = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+        headers = {
+            "X-Api-Key": VOLC_API_KEY,
+            "X-Api-Resource-Id": "seed-tts-2.0",
+            "X-Api-Request-Id": str(uuid.uuid4()),
+            "Content-Type": "application/json",
+            "Connection": "keep-alive"
+        }
+        payload = {
+            "req_params": {
+                "text": text[:1000],  # 限制长度
+                "speaker": VOLC_VOICE,
+                "audio_params": {
+                    "format": "mp3",
+                    "sample_rate": 24000
+                }
+            }
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30, stream=True)
+        if resp.status_code != 200:
+            print(f"⚠️ 火山引擎TTS HTTP错误: {resp.status_code} {resp.text[:200]}")
+            return False
+        # 流式读取，拼接所有音频块
+        audio_chunks = []
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+                if chunk.get("code") not in (0, 20000000):  # 0=正常数据，20000000=结束标记
+                    _code = chunk.get("code", "")
+                    _msg = chunk.get("message", "")
+                    print(f"⚠️ 火山引擎TTS chunk错误: code={_code} msg={_msg}")
+                    return False
+                b64_data = chunk.get("data", "")
+                if b64_data:
+                    audio_chunks.append(base64.b64decode(b64_data))
+            except json.JSONDecodeError:
+                continue
+        if not audio_chunks:
+            print(f"⚠️ 火山引擎TTS返回空音频")
+            return False
+        # 拼接写入文件
+        with open(output_path, "wb") as f:
+            for chunk in audio_chunks:
+                f.write(chunk)
+        return True
     except Exception as e:
-        print(f"⚠️ 获取引用消息失败：{e}")
-        return {}
+        print(f"⚠️ 火山引擎TTS异常：{e}")
+        return False
 
 
-# ===================== 汽水音乐解析（纯requests，从_ROUTER_DATA提取音频） =====================
 def _qs_extract_json(html, marker):
     """括号匹配法提取 marker 后的第一个完整 JSON 对象"""
     idx = html.find(marker)
@@ -4182,7 +4244,7 @@ def _load_config_file():
     global ENABLE_EMOJI, EMOJI_DIR, EMOJI_MAP
     global ENABLE_VIDEO, ENABLE_VOICE
     global ENABLE_MERGE, MERGE_WAIT_SECONDS, MERGE_MAX_COUNT
-    global ENABLE_TTS, TTS_VOICE
+    global ENABLE_TTS, TTS_ENGINE, TTS_VOICE, VOLC_API_KEY, VOLC_VOICE
 
     # onebot_ws：环境变量优先（Docker compose 里用它指向 napcat:6700，yml里可保持127.0.0.1给本机用）
     ONEBOT_WS = os.environ.get("QQ2_ONEBOT_WS") or s("onebot_ws", ONEBOT_WS)
@@ -4282,11 +4344,17 @@ def _load_config_file():
     _tts_voice = s("tts_voice", "")
     if _tts_voice:
         TTS_VOICE = _tts_voice
+    # TTS引擎选择（edge/volc）+ 火山引擎配置
+    _tts_engine = s("tts_engine", "")
+    if _tts_engine:
+        TTS_ENGINE = _tts_engine
+    VOLC_API_KEY = s("volc_api_key", VOLC_API_KEY)
+    VOLC_VOICE = s("volc_voice", VOLC_VOICE)
     if ENABLE_TTS:
-        print(f"🎙️ AI回复转语音已开启：edge-tts 音色={TTS_VOICE}（所有AI回复发语音条）")
-    # 消息合并（防抖）：同一会话连续消息合并成一次AI回复
-    ENABLE_MERGE = b("enable_message_merge", ENABLE_MERGE)
-    MERGE_WAIT_SECONDS = i("merge_wait_seconds", MERGE_WAIT_SECONDS)
+        if TTS_ENGINE == "volc" and VOLC_API_KEY:
+            print(f"🎙️ AI回复转语音已开启：火山引擎 音色={VOLC_VOICE}")
+        else:
+            print(f"🎙️ AI回复转语音已开启：edge-tts 音色={TTS_VOICE}")
     MERGE_MAX_COUNT = i("merge_max_count", MERGE_MAX_COUNT)
     if MERGE_WAIT_SECONDS < 1: MERGE_WAIT_SECONDS = 1
     if MERGE_MAX_COUNT < 1: MERGE_MAX_COUNT = 1
