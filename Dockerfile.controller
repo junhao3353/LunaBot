@@ -1,0 +1,25 @@
+# QQ远程控制器（通过docker.sock控制宿主机容器）
+# 构建：docker compose -p qqbot build controller
+ARG PY_BASE=docker.1ms.run/library/python:3.11-slim
+FROM ${PY_BASE}
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Shanghai \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+RUN sed -i 's@deb.debian.org@mirrors.aliyun.com@g' /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null; \
+    apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo "$TZ" > /etc/timezone
+
+WORKDIR /app
+
+COPY requirements-controller.txt ./
+RUN pip install --no-cache-dir -r requirements-controller.txt
+
+COPY QQ_Controller.py ./
+
+CMD ["python", "-u", "QQ_Controller.py"]

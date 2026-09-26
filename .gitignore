@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv38/
+.idea/
+
+# 敏感配置（含API key，不提交）
+qqbot-config.yml
+onebot11_backup.json
+volc_api_key.txt
+ttwid.txt
+QQ.txt
+QQKZT.txt
+QQLT.txt
+
+# 用户数据（隐私，不提交）
+memory/
+transfer/
+logs/
+data/
+
+# 临时文件
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# 大文件
+ffmpeg.exe
+infra.dll
+*.zip
+*.mp4
+*.mp3
