@@ -41,3 +41,4 @@ tenacity>=9.0.0
 # torch/torchaudio 已在Dockerfile里单独装CPU版，这里不用重复
 funasr>=1.4.16
 edge-tts>=7.2.8
+psutil>=5.9.0

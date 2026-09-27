@@ -218,9 +218,29 @@ EMOJI_MAP = {}                 # 表情名(文件名去扩展名) -> 图片绝�
 _EMOJI_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
 SYSTEM_PROMPT = None  # 人设从 qqbot-config.yml 的 system_prompt 加载
+
+# 回复风格硬限制（防人机感，自动追加在人设后面，不占用人设内容）
+REPLY_STYLE_PROMPT = """
+
+【回复风格硬性规则】
+1. 像真实群友一样说话：短、松、随意，正常人聊天一次就说1-2句话，最多3句
+2. 禁止客服腔、助手腔、小作文，别讲大道理，别科普，别列步骤
+3. 标点只用：，？！ 这三个。禁止用句号、省略号、波浪号、冒号、分号
+4. 禁止任何动作描写，比如（挠头）(叹气)【捂脸】这种
+5. 禁止自称AI、助手、语言模型、机器人，你就是群里的一个人
+6. 别人问的问题没那么复杂的时候，直接说重点，别铺垫
+7. 不要每次都长篇大论，有时候一个"？"、"嗯？"、"行吧"就够了
+8. 说话要有烟火气，像跟熟人聊天，不要像写作文
+"""
 # ==================================================================
 
 # ===================== 环境变量覆盖（NAS/Docker部署用；不设则用上面的默认值） =====================
+def _format_now():
+    """返回当前时间戳字符串：MM-DD HH:MM，给AI看用"""
+    import datetime
+    now = datetime.datetime.now()
+    return now.strftime("%m-%d %H:%M")
+
 def _env_bool(name: str, default):
     raw = os.environ.get(name)
     if raw is None:
@@ -776,9 +796,14 @@ def _ambient_take_text(chat_id) -> str:
     lst = _ambient_msgs.pop(chat_id, None)
     if not lst:
         return ""
-    body = "\n".join(f"[QQ号:{x['user_id']}] {x['text']}" for x in lst)
+    import datetime
+    lines = []
+    for x in lst:
+        _t = datetime.datetime.fromtimestamp(x.get("ts", time.time())).strftime("%m-%d %H:%M")
+        lines.append(f"[{_t}] [QQ号:{x['user_id']}] {x['text']}")
+    body = "\n".join(lines)
     return ("\n\n【群里的背景闲聊（以下消息都【没有】@你，只是让你了解上下文，"
-            "不要专门回应或复述它们，也不要因此改变你的回复对象）】\n" + body)
+            "不要专门回应或复述它们，也不要因此改变你的回复对象，注意每条前面的时间）】\n" + body)
 
 
 def download_image_as_data_url(image_url):
@@ -3031,11 +3056,12 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     # 场景化记忆key：群聊=g{群号}_{QQ}，私聊=p{QQ}——私聊记的事不串到群里
     member_key = f"g{obj_id}_{user_id}" if is_group else f"p{user_id}"
     # 系统提示词放在最前面（追加永久记忆块：当前发言人档案+全局备忘；私聊加私密层）
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + _build_memory_block(member_key, is_private=not is_group)}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + REPLY_STYLE_PROMPT + _build_memory_block(member_key, is_private=not is_group)}]
     # 加上历史对话
     messages.extend(history)
     # 加上当前用户消息，前面带QQ号标识
-    messages.append({"role": "user", "content": f"[QQ号:{user_id}] {prompt}"})
+    _now_str = _format_now()
+    messages.append({"role": "user", "content": f"[{_now_str}][QQ号:{user_id}] {prompt}"})
 
     # 定义搜索工具，让AI自己判断是否调用、调用几次、用什么关键词
     # 只有开启联网搜索时才下发搜索工具；记忆工具按 ENABLE_MEMORY 独立下发
@@ -3289,11 +3315,12 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
     }
     # 场景化记忆key：群聊=g{群号}_{QQ}，私聊=p{QQ}——私聊记的事不串到群里
     member_key = f"g{obj_id}_{user_id}" if is_group else f"p{user_id}"
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + _build_memory_block(member_key, is_private=not is_group)}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + REPLY_STYLE_PROMPT + _build_memory_block(member_key, is_private=not is_group)}]
     # 历史只保留纯文本（图片base64太大不入历史）
     messages.extend(history)
     # 当前用户消息：文字 + 多张图片（一次性投完，不逐张识别）
-    content = [{"type": "text", "text": f"[QQ号:{user_id}] {prompt}"}]
+    _now_str = _format_now()
+    content = [{"type": "text", "text": f"[{_now_str}][QQ号:{user_id}] {prompt}"}]
     for data_url in image_data_urls:
         content.append({"type": "image_url", "image_url": {"url": data_url}})
     messages.append({"role": "user", "content": content})
@@ -3524,6 +3551,22 @@ def spawn_link_download(websocket, chat_id, is_group, url, kind):
 
 
 # ===================== 消息合并（防抖）：同一会话连续消息合并成一次AI回复 =====================
+async def get_reply_message(ws, message_id):
+    """调用OneBot API根据消息ID获取被回复的消息内容"""
+    try:
+        payload = {
+            "action": "get_msg",
+            "params": {"message_id": message_id},
+            "echo": f"get_msg_{message_id}"
+        }
+        await ws.send(json.dumps(payload))
+        # 简单等待返回（这里用同步方式拿不到，先返回None避免报错，后面再改异步）
+        return None
+    except Exception as e:
+        print(f"获取回复消息失败：{e}")
+        return None
+
+
 async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, reply_text=""):
     """单次AI回复完整流程：取图片/视频/语音缓存→组装prompt→调模型→更新上下文→分段发送→表情包。
     由主循环（未开启合并）或合并worker调用；异常只影响本条消息，不冒泡断WS。
@@ -3638,13 +3681,26 @@ async def _merge_worker(ws, chat_id, is_group):
                 display_text = msgs[0]["display_text"]
                 reply_text = msgs[0].get("reply_text", "")
             else:
-                _lines = []
-                for _i, _m in enumerate(msgs, 1):
-                    _t = (_m["user_text"] or "").strip() or "（空消息）"
-                    _lines.append(f"第{_i}条：{_t}")
-                user_text = f"（你连续发送了{len(msgs)}条消息，这是一次连续发送，请一并回复）\n" + "\n".join(_lines)
-                display_text = " | ".join(_m["display_text"] for _m in msgs)
-                reply_text = "\n".join(_m.get("reply_text", "") for _m in msgs if _m.get("reply_text"))
+                # 检查是不是同一个人发的
+                user_ids = set(_m["user_id"] for _m in msgs)
+                if len(user_ids) == 1:
+                    # 同一个人连续发的
+                    _lines = []
+                    for _i, _m in enumerate(msgs, 1):
+                        _t = (_m["user_text"] or "").strip() or "（空消息）"
+                        _lines.append(f"第{_i}条：{_t}")
+                    user_text = f"（你连续发送了{len(msgs)}条消息，这是一次连续发送，请一并回复）\n" + "\n".join(_lines)
+                    display_text = " | ".join(_m["display_text"] for _m in msgs)
+                    reply_text = "\n".join(_m.get("reply_text", "") for _m in msgs if _m.get("reply_text"))
+                else:
+                    # 不同人连续发的：按昵称区分
+                    _lines = []
+                    for _m in msgs:
+                        _t = (_m["user_text"] or "").strip() or "（空消息）"
+                        _lines.append(f"{_m['nickname']}：{_t}")
+                    user_text = f"（群里连续{len(msgs)}条消息，分别来自不同的人，请一并回复）\n" + "\n".join(_lines)
+                    display_text = " | ".join(f"{_m['nickname']}：{_m['display_text']}" for _m in msgs)
+                    reply_text = "\n".join(_m.get("reply_text", "") for _m in msgs if _m.get("reply_text"))
             print(f"🧩 合并窗口结束，{len(msgs)}条消息一起回复（{'群' if is_group else '私聊'}{chat_id}）")
             try:
                 await _do_ai_reply(ws, chat_id, msgs[-1]["user_id"], is_group, user_text, display_text, reply_text)
@@ -3780,6 +3836,7 @@ async def main():
 
                 message_type = data.get("message_type")
                 user_id = data.get("user_id")
+                nickname = data.get("sender", {}).get("nickname", str(user_id))
                 message = data.get("message", "") or ""
                 raw_msg = data.get("raw_message", "") or ""
                 self_id = data.get("self_id")  # 机器人小号QQ
@@ -4155,6 +4212,7 @@ async def main():
                         "display_text": display_text,
                         "reply_text": reply_text,
                         "user_id": user_id,
+                        "nickname": nickname,
                         "ts": time.time(),
                     })
                     _merge_last_ts[chat_id] = time.time()
