@@ -3753,7 +3753,7 @@ async def main():
             print("🧩 消息合并已关闭：每条消息立即单独回复")
         # 不再自动刷新v2 cookie（避免触发aweme/detail API风控）
         # v3直接读config.yaml里的登录cookie即可
-        if ENABLE_WEB_SEARCH and BOCHA_API_KEY != "你的博查API_KEY":
+        if ENABLE_WEB_SEARCH and BOCHA_API_KEY and len(BOCHA_API_KEY.strip()) > 10:
             print("🌐 博查AI联网搜索已开启")
         elif ENABLE_WEB_SEARCH:
             print("⚠️  未配置博查API_KEY，联网搜索未启用")
