@@ -14,8 +14,9 @@ services:
       - NAPCAT_UID=0
       - NAPCAT_GID=0
       - ACCOUNT=3636055507   # 启动自动快速登录该QQ（首次仍需扫码一次，之后重启免扫码）
-      - NAPCAT_QUICK_PASSWORD=REDACTED   # 快速登录失效时的密码回退（明文）
-      - NAPCAT_QUICK_PASSWORD_MD5=REDACTED   # 密码MD5（备用）
+      # 快速登录密码/MD5 与 OneBot token 的真值放在同目录 .env（已被 .gitignore 忽略，不会提交）
+      - NAPCAT_QUICK_PASSWORD=${NAPCAT_QUICK_PASSWORD}
+      - NAPCAT_QUICK_PASSWORD_MD5=${NAPCAT_QUICK_PASSWORD_MD5}
     ports:
       - "6099:6099"   # NapCat webui（首次登录QQ扫码、改配置用）
       - "6800:6700"   # OneBot WS 宿主机6800（容器内仍6700，qqbot走内网napcat:6700；6600撞Windows保留段6567-6666已弃用）
@@ -36,7 +37,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       # bot只找容器网内的 NapCat 6700端口（自动覆盖yml里的onebot_ws，不依赖你电脑的127.0.0.1）
-      - QQ2_ONEBOT_WS=ws://napcat:6700?access_token=REDACTED
+      - QQ2_ONEBOT_WS=ws://napcat:6700?access_token=${ONEBOT_TOKEN}
       # 共享目录投递（覆盖yml的docker-cp默认值；本机直跑QQ2.py时才用yml的docker-cp）
       - QQ2_NAPCAT_CONTAINER=
       - QQ2_NAPCAT_HOST_DIR=/deliver
@@ -70,7 +71,7 @@ services:
       - napcat
     environment:
       - TZ=Asia/Shanghai
-      - CTRL_ONEBOT_WS=ws://napcat:6700?access_token=REDACTED
+      - CTRL_ONEBOT_WS=ws://napcat:6700?access_token=${ONEBOT_TOKEN}
       - CTRL_ALLOWED_GROUPS=996930225
       - CTRL_ALLOWED_USERS=3353936945
       - CTRL_CONTAINER_AI=qq-bot
