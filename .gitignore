@@ -27,6 +27,23 @@ crawlers/douyin/web/config.yaml.bak
 add_cookie.py
 fix_cookie.py
 fix_v5_cookie.py
+# 一次性调试脚本（本地用，不入库）
+fix_*.py
+fix_call.py
+test_v5.py
+enable_v5.py
+disable_v5.py
+final_fix.py
+
+# 本地备份目录（含旧版代码与 .env 副本，绝不提交）
+backup/
+
+# 外部项目克隆：抖音解析服务源码（独立仓库，含它自己的 .env 密钥，绝不在本仓库提交）
+resolver/
+
+# 解析服务真实 compose（可能含 key/密码；模板 *.example 才入库）
+docker-compose.dtk.yml
+!docker-compose.dtk.yml.example
 
 # 用户数据（隐私，不提交）
 memory/

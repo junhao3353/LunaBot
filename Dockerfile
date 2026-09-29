@@ -23,14 +23,11 @@ WORKDIR /app
 COPY requirements.txt ./
 # 先装CPU版torch（避免拉GPU版几个GB的CUDA包）
 RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-# 再装其他依赖
+# 再装其他依赖（抖音解析已移到独立容器，本镜像不再需要 playwright/crawlers）
 RUN pip install --no-cache-dir -r requirements.txt
-# 装Playwright Chromium（国内镜像源，v5抖音解析用）
-ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
-RUN playwright install chromium --with-deps
 
 COPY QQ_AI_Bot.py ./
-COPY crawlers ./crawlers
+COPY douyin_dtk.py ./
 
 # 默认按“NAS共享目录”模式运行（与NapCat容器共享 ./transfer），compose会用env覆盖
 # 注意：access_token 这里只放占位符，真实token由 docker-compose 的 .env（ONEBOT_TOKEN）注入，避免泄露

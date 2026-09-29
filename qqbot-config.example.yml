@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # QQ机器人 配置文件模板（qqbot-config.example.yml）
 # 使用方法：复制一份重命名为 qqbot-config.yml，然后填上你自己的配置
 # ============================================================
@@ -108,7 +108,22 @@ zip_password: ""
 max_send_mb: 60
 download_root: "本子下载"
 # 抖音ttwid（浏览器登录抖音后F12→Application→Cookies→ttwid，有效期约1-2周）
-douyin_ttwid: ""
+# ---------- 抖音解析（交给独立的 douyin_tiktok_download_api 容器） ----------
+# 主程序不再做任何抖音解析/签名/Cookie：收到链接 → 提交给解析容器 → 等它下载完 → 上传到QQ
+# 抖音改版时只需更新解析容器，本文件与代码都不用动
+enable_douyin_api: true
+# 解析服务地址（DTK v5：http://dtk-api:8000）
+douyin_api_base: ""
+# 解析服务 API Key（在解析服务控制台创建，需要 media:read + media:write 权限）
+# 推荐改用环境变量 QQ2_DOUYIN_API_KEY 注入，避免写进文件
+douyin_api_key: ""
+# 轮询任务状态的间隔（秒）
+douyin_poll_interval: 3
+# 单个任务最长等待（秒），超时则放弃并告知用户
+douyin_job_timeout: 300
+# 可选：把解析服务的 media-data 卷挂到本容器后填这里（如 /dtk_media）
+# 填了可直接读文件（省一次HTTP传输）；留空则通过 API /downloads/{id}/files/{name} 取回
+douyin_media_dir: ""
 
 # ---------- 发送方式 ----------
 send_file_as_chat_msg: false

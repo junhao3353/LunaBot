@@ -47,6 +47,10 @@ services:
       - QQ2_MEMORY_FILE=/app/memory/memory.json
       # AI表情包目录（宿主机"表情包"文件夹挂到容器/app/emoji，只读；文件名即表情描述）
       - QQ2_EMOJI_DIR=/app/emoji
+      # 抖音解析服务（独立容器 douyin_tiktok_download_api；在 .env 里填地址与Key）
+      - QQ2_DOUYIN_API_BASE=${QQ2_DOUYIN_API_BASE:-}
+      - QQ2_DOUYIN_API_KEY=${QQ2_DOUYIN_API_KEY:-}
+      - QQ2_DOUYIN_MEDIA_DIR=${QQ2_DOUYIN_MEDIA_DIR:-}
       # 其余所有配置（key/白名单/人设/下载格式/密码…）都在 qqbot-config.yml，已挂载到容器
     volumes:
       - bot-data:/data                 # 下载缓存+日志持久化（缓存用完自删）
@@ -55,11 +59,15 @@ services:
       - ./表情包:/app/emoji:ro          # AI表情包目录（只读，文件名去扩展名=表情描述，AI自主选发）
       - ./qqbot-config.yml:/app/qqbot-config.yml:ro   # 配置只读挂载，改文件后重启容器生效
       - ./QQ_AI_Bot.py:/app/QQ_AI_Bot.py                  # 代码挂载：PyCharm改宿主机QQ_AI_Bot.py，容器实时同步，重启即生效（开发用，免build）
-      - ./crawlers:/app/crawlers        # v2解析器代码+Cookie配置挂载，改本地文件重启即生效（免build）
+      - ./douyin_dtk.py:/app/douyin_dtk.py                # 抖音解析服务客户端（与主程序一起挂载，改完重启即生效）
       - model-cache:/root/.cache/modelscope  # SenseVoice模型缓存持久化（936MB，只下一次）
       - napcat-qqdata:/app/.config/QQ  # 共享napcat的QQ数据卷（get_file返回的本地路径可直接访问）
+      # 可选：与解析服务共享媒体卷，直接读文件（解析服务用 --profile downloader 启动后，取消下面注释）
+      # - dtk-media:/dtk_media:ro
     networks:
       - qqbot
+      # 可选：接入解析服务的 docker 网络（解析栈先起，再执行 docker network connect dtk_default qq-bot）
+      # - dtk-net
 
   controller:
     build:
@@ -89,6 +97,15 @@ volumes:
   napcat-qqdata:
   bot-data:
   model-cache:
+  # 可选：解析服务的媒体卷（解析栈用项目名 dtk 启动后卷名为 dtk_media-data）
+  # 想直接读文件就取消注释，并把上面 qqbot 的 dtk-media 挂载也取消注释
+  # dtk-media:
+  #   external: true
+  #   name: dtk_media-data
 
 networks:
   qqbot:
+  # 可选：解析服务的网络（解析栈默认项目名 dtk → 网络名 dtk_default）
+  # dtk-net:
+  #   external: true
+  #   name: dtk_default

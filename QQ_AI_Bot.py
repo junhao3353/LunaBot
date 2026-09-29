@@ -1,4 +1,4 @@
-﻿#每次更改代码的时候请备份到backup
+#每次更改代码的时候请备份到backup
 # 本次修改（备份见 backup\QQ2_20260904_182434.py）：
 #  1. 新增单连接消息分发器：事件全部进队列，API响应按echo交给等待方，不再丢消息
 #  2. 图片识别/DeepSeek调用改为 asyncio.to_thread，不再卡死事件循环
@@ -30,6 +30,7 @@
 import asyncio
 from typing import Optional
 import jmcomic
+import douyin_dtk
 import websockets
 import json
 import requests
@@ -1233,7 +1234,14 @@ MAX_SEND_MB = None  # 从 qqbot-config.yml 的 max_send_mb 加载
 # 本机需要安装 7-Zip（C:\Program Files\7-Zip\7z.exe）。
 ZIP_PASSWORD = None  # 从 qqbot-config.yml 的 zip_password 加载
 _CONVERT_DIR = None  # 由 _load_config_file 根据 download_root 设置
-DOUYIN_TTWID = None  # 从 qqbot-config.yml 的 douyin_ttwid 加载（抖音视频/图文解析需要，留空则抖音功能不可用）
+# ---- 抖音：解析与下载全部交给 douyin_tiktok_download_api 容器 ----
+# 主程序只提交链接、轮询任务、把下好的文件上传到QQ；本地不再有任何抖音解析/签名/Cookie 逻辑
+ENABLE_DOUYIN_API = True      # 总开关
+DOUYIN_API_BASE = ""          # 解析服务地址，如 http://dtk-api:8000
+DOUYIN_API_KEY = ""           # 解析服务API Key（需 media:read + media:write；建议用环境变量 QQ2_DOUYIN_API_KEY）
+DOUYIN_POLL_INTERVAL = 3      # 轮询任务状态间隔（秒）
+DOUYIN_JOB_TIMEOUT = 300      # 单任务最长等待（秒）
+DOUYIN_MEDIA_DIR = ""         # 可选：解析服务的 media-data 卷挂到本容器后的路径（填了直接读文件，省一次HTTP）
 
 
 def _find_7z():
@@ -1965,572 +1973,148 @@ def _clean_douyin_url(raw_link):
     return raw_link.split()[0]
 
 
-def douyin_parse(raw_link):
-    """用ttwid + 抖音web API解析作品，返回 (title, is_video, video_url, images_list, headers, error_msg)"""
-    raw_link = _clean_douyin_url(raw_link)
-    if not DOUYIN_TTWID:
-        return None, None, None, None, None, (
-            "抖音ttwid未配置！请在qqbot-config.yml的douyin_ttwid填入你的ttwid值。"
-            "获取：浏览器登录抖音 → F12 → Application → Cookies → www.douyin.com → 复制ttwid的值"
-        )
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": _DOUYIN_UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-    })
-    s.cookies.set("ttwid", DOUYIN_TTWID, domain=".douyin.com")
-    try:
-        resp = s.get(raw_link, allow_redirects=True, timeout=20)
-        final_url = str(resp.url)
-    except Exception as e:
-        return None, None, None, None, None, f"短链访问失败：{e}"
-    if "/user/" in final_url:
-        return None, None, None, None, None, "抖音主页链接不支持，请发单个作品链接"
-    id_match = re.search(r'/(?:video|note|share)/(\d+)', final_url)
-    if not id_match:
-        return None, None, None, None, None, "无法提取作品ID"
-    aweme_id = id_match.group(1)
-    try:
-        api_resp = s.get(
-            f"https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}",
-            headers={"Referer": final_url}, timeout=15)
-        if api_resp.status_code != 200:
-            return None, None, None, None, None, f"API请求失败，状态码：{api_resp.status_code}（ttwid可能已过期）"
-        data = api_resp.json()
-    except Exception as e:
-        return None, None, None, None, None, f"API解析失败：{e}（ttwid可能已过期）"
-    if data.get("status_code") != 0:
-        return None, None, None, None, None, f"API返回错误：status_code={data.get('status_code')}（ttwid可能已过期）"
-    item = data.get("aweme_detail")
-    if not item:
-        return None, None, None, None, None, "API返回中未找到作品数据"
-    title = item.get("desc", "抖音作品")
-    cookie_str = "; ".join([f"{c.name}={c.value}" for c in s.cookies])
-    dy_headers = {"User-Agent": _DOUYIN_UA, "Referer": final_url, "Cookie": cookie_str}
-    if "video" in item and item.get("video"):
-        # 从bit_rate中选择最高清晰度（按height降序，相同height按bit_rate降序）
-        video_data = item["video"]
-        bit_rates = video_data.get("bit_rate", []) or []
-        best_url = None
-        best_info = ""
-        if bit_rates:
-            sorted_br = sorted(bit_rates, key=lambda x: (x.get("play_addr", {}).get("height", 0), x.get("bit_rate", 0)), reverse=True)
-            for br in sorted_br:
-                pa = br.get("play_addr", {})
-                url_list = pa.get("url_list", [])
-                if url_list:
-                    best_url = url_list[0]
-                    h = pa.get("height", 0)
-                    w = pa.get("width", 0)
-                    br_kbps = int(br.get("bit_rate", 0) / 1000)
-                    best_info = f"{w}x{h} ({br_kbps}kbps)"
-                    break
-        # 回退到默认play_addr
-        if not best_url:
-            best_url = video_data["play_addr"]["url_list"][0]
-            h = video_data["play_addr"].get("height", 0)
-            w = video_data["play_addr"].get("width", 0)
-            best_info = f"{w}x{h} (默认)"
-        print(f"🎬 选择清晰度：{best_info}")
-        return title, True, best_url, [], dy_headers, None
-    elif "images" in item and item.get("images"):
-        return None, None, None, None, None, "图文作品暂不支持，只支持抖音视频下载"
-    else:
-        return None, None, None, None, None, "无法识别作品类型（既不是视频也不是图文）"
-
-
-# ============================================================
-# 抖音 v2 解析器（Douyin_TikTok_Download_API，支持1080p）
-# 优先用 v2，失败自动降级到 v1
-# ============================================================
-_DY_V2_COOKIE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "crawlers", "douyin", "web", "config.yaml")
-
-
-def refresh_douyin_cookie_v2():
-    """自动刷新 v2 解析器的 Cookie（ttwid + msToken + s_v_web_id），写入 config.yaml。
-    成功返回 True，失败返回 False。"""
-    try:
-        import random as _rnd
-        import string as _str
-
-        # 1. ttwid
-        ttwid = None
-        try:
-            _tt_data = json.dumps({
-                "region": "cn", "aid": 1768, "needFid": False,
-                "service": "www.ixigua.com",
-                "migrate_info": {"ticket": "", "source": "node"},
-                "cbUrlProtocol": "https", "union": True
-            })
-            _r = requests.post("https://ttwid.bytedance.com/ttwid/union/register/",
-                               data=_tt_data, timeout=15,
-                               headers={"Content-Type": "application/json"})
-            ttwid = _r.cookies.get("ttwid")
-        except Exception:
-            pass
-
-        # 2. msToken（失败用虚假的）
-        msToken = None
-        try:
-            _mst_strdata = ("fWOdJTQR3/jwmZqBBsPO6tdNEc1jX7YTwPg0Z8CT+j3HScLFbj2Zm1XQ7"
-                            "/lqgSutntVKLJWaY3Hc/+vc0h+So9N1t6EqiImu5jKyUa+S4NPy6cNP0x9CUQQ"
-                            "gb4+RRihCgsn4QyV8jivEFOsj3N5zFQbzXRyOV+9aG5B5EAnwpn8C70llsWq0zJ"
-                            "z1VjN6y2KZiBZRyonAHE8feSGpwMDeUTllvq6BG3AQZz7RrORLWNCLEoGzM6bMovY"
-                            "VPRAJipuUML4Hq/568bNb5vqAo0eOFpvTZjQFgbB7f/CtAYYmnOYlvfrHKBKvb0TX"
-                            "6AjYrw2qmNNEer2ADJosmT5kZeBsogDui8rNiI/OOdX9PVotmcSmHOLRfw1cYXTgwH"
-                            "Xr6cJeJveuipgwtUj2FNT4YCdZfUGGyRDz5bR5bdBuYiSRteSX12EktobsKPksdhUPG"
-                            "Gv99SI1QRVmR0ETdWqnKWOj/7ujFZsNnfCLxNfqxQYEZEp9/U01CHhWLVrdzlrJ1v+K"
-                            "JH9EA4P1Wo5/2fuBFVdIz2upFqEQ11DJu8LSyD43qpTok+hFG3Moqrr81uPYiyPHnUvT"
-                            "FgwA/TIE11mTc/pNvYIb8IdbE4UAlsR90eYvPkI+rK9KpYN/l0s9ti9sqTth12VAw8tz"
-                            "CQvhKtxevJRQntU3STeZ3coz9Dg8qkvaSNFWuBDuyefZBGVSgILFdMy33//l/eTXhQpFr"
-                            "Vc9OyxDNsG6cvdFwu7trkAENHU5eQEWkFSXBx9Ml54+fa3LvJBoacfPViyvzkJworlHcYY"
-                            "TG392L4q6wuMSSpYUconb+0c5mwqnnLP6MvRdm/bBTaY2Q6RfJcCxyLW0xsJMO6fgLUEjA"
-                            "g/dcqGxl6gDjUVRWbCcG1NAwPCfmYARTuXQYbFc8LO+r6WQTWikO9Q7Cgda78pwH07F8bg"
-                            "J8zFBbWmyrghilNXENNQkyIzBqOQ1V3w0WXF9+Z3vG3aBKCjIENqAQM9qnC14WMrQkfCHo"
-                            "sGbQyEH0n/5R2AaVTE/ye2oPQBWG1m0Gfcgs/96f6yYrsxbDcSnMvsA+okyd6GfWsdZYTIK"
-                            "1E97PYHlncFeOjxySjPpfy6wJc4UlArJEBZYmgveo1SZAhmXl3pJY3yJa9CmYImWkhbpwsV"
-                            "kSmG3g11JitJXTGLIfqKXSAhh+7jg4HTKe+5KNir8xmbBI/DF8O/+diFAlD+BQd3cV0G4mE"
-                            "tCiPEhOvVLKV1pE+fv7nKJh0t38wNVdbs3qHtiQNN7JhY4uWZAosMuBXSjpEtoNUndI+o0cj"
-                            "R8XJ8tSFnrAY8XihiRzLMfeisiZxWCvVwIP3kum9MSHXma75cdCQGFBfFRj0jPn1JildrTh"
-                            "2vRgwG+KeDZ33BJ2VGw9PgRkztZ2l/W5d32jc7H91FftFFhwXil6sA23mr6nNp6CcrO7rObl"
-                            "cm5SzXJ5MA601+WVic/g3p6A0lAnhjsm37qP+xGT+cbCFOfjexDYEhnqz0QZm94CCSnilQ9B"
-                            "/HBLhWOddp9GK0SABIk5i3xAH701Xb4HCcgAulvfO5EK0RL2eN4fb+CccgZQeO1Zzo4qsMHc1"
-                            "3UG0saMgBEH8SqYlHz2S0CVHuDY5j1MSV0nsShjM01vIynw6K0T8kmEyNjt1eRGlleJ5lvE8vo"
-                            "nJv7rAeaVRZ06rlYaxrMT6cK3RSHd2liE50Z3ik3xezwWoaY6zBXvCzljyEmqjNFgAPU3gI+N1"
-                            "vi0MsFmwAwFzYqqWdk3jwRoWLp//FnawQX0g5T64CnfAe/o2e/8o5/bvz83OsAAwZoR48GZzPu"
-                            "7KCIN9q4GBjyrePNx5Csq2srblifmzSKwF5MP/RLYsk6mEE15jpCMKOVlHcu0zhJybNP3AKMVl"
-                            "lF6pvn+HWvUnLXNkt0A6zsfvjAva/tbLQiiiYi6vtheasIyDz3HpODlI+BCkV6V8lkTt7m8J1Ic"
-                            "gTfqjQBummyjYTSwsQji3DdNCnlKYd13ZQa545utqu837FFAzOZQhbnC3bKqeJqO2sE3m7WBUMb"
-                            "RWLflPRqp/PsklN+9jBPADKxKPl8g6/NZVq8fB1w68D5EJlGExdDhglo4B0aihHhb1u3+zJ2Dqk"
-                            "xkPCGBAZ2AcuFIDzD53yS4NssoWb4HJ7YyzPaJro+tgG9TshWRBtUw8Or3m0OtQtX+rboYn3+Gx"
-                            "vD1O8vWInrg5qxnepelRcQzmnor4rHF6ZNhAJZAf18Rjncra00HPJBugY5rD+EwnN9+mGQo43b01"
-                            "qBBRYEnxy9JJYuvXxNXxe47/MEPOw6qsxN+dmyIWZSuzkw8K+iBM/anE11yfU4qTFt0veCaVprK6"
-                            "tXaFK0ZhGXDOYJd70sjIP4UrPhatp8hqIXSJ2cwi70B+TvlDk/o19CA3bH6YxrAAVeag1P9hmNlf"
-                            "J7NxK3Jp7+Ny1Vd7JHWVF+R6rSJiXXPfsXi3ZEy0klJAjI51NrDAnzNtgIQf0V8OWeEVv7F8Rsm3"
-                            "/GKnjdNOcDKymi9agZUgtctENWbCXGFnI40NHuVHtBRZeYAYtwfV7v6U0bP9s7uZGpkp+OETHMv3"
-                            "AyV0MVbZwQvarnjmct4Z3Vma+DvT+Z4VlMVnkC2x2FLt26K3SIMz+KV2XLv5ocEdPFSn1vMR7zru"
-                            "CWC8XqAG288biHo/soldmb/nlw8o8qlfZj4h296K3hfdFubGIUtqgsrZCrLCkkRC08Cv1ozEX/y6t"
-                            "2YrQepwiNmwDVk5IufStVvJMj+y2r9TcYLv7UKWXx3P6aySvM2ZHPaZhv+6Z/A/jIMBSvOizn4qG1"
-                            "1iK7Oo6JYhxCSMJZsetjsnL4ecSIAufEmoFlAScWBh6nFArRpVLvkAZ3tej7H2lWFRXIU7x7mdBfG"
-                            "qU82PpM6znKMMZCpEsvHqpkSPSL+Kwz2z1f5wW7BKcKK4kNZ8iveg9VzY1NNjs91qU8DJpUnGyM04"
-                            "C7KNMpeilEmoOxvyelMQdi85ndOVmigVKmy5JYlODNX744sHpeqmMEK/ux3xY5O406lm7dZlyGPSM"
-                            "rFWbm4rzqvSEIskP43+9xVP8L84GeHE4RpOHg3qh/shx+/WnT1UhKuKpByHCpLoEo144udpzZswCY"
-                            "SMp58uPrlwdVF31//AacTRk8dUP3tBlnSQPa1eTpXWFCn7vIiqOTXaRL//YQK+e7ssrgSUnwhuGKJ"
-                            "8aqNDgdsL+haVZnV9g5Qrju643adyNixvYFEp0uxzOzVkekOMh2FYnFVIL2mJYGpZEXlAIC0zQbb54"
-                            "rSP89j0G7soJ2HcOkD0NmMEWj/7hUdTuMin1lRNde/qmHjwhbhqL8Z9MEO/YG3iLMgFTgSNQQhyE8"
-                            "AZAAKnehmzjORJfbK+qxyiJ07J843EDduzOoYt9p/YLqyTFmAgpdfK0uYrtAJ47cbl5WWhVXp5/XUx"
-                            "wWdL7TvQB0Xh6ir1/XBRcsVSDrR7cPE221ThmW1EPzD+SPf2L2gS0WromZqj1PhLgk92YnnR9s7/n"
-                            "LBXZHPKy+fDbJT16QqabFKqAl9G0blyfR5UGX2kN+iQp4VGXEoH5lXxNNTlgRskzrW7KliQXcac20o"
-                            "imAHUE8Phf+rXXglpmSv4XN3eiwfXwvOaAMVjMRmRxsKitl5iZnwpcdbsC4jt16g2r/ihlKzLIYju+X"
-                            "Zej4dNMlkftEidyNg24IVimJthXY1H15RZ8Hm7mAM/JZrsxiAVI0A49pWEiUk3cyZcBzq/vVEjHUy4"
-                            "r6IZnKkRvLjqsvqWE95nAGMor+F0GLHWfBCVkuI51EIOknwSB1eTvLgwgRepV4pdy9cdp6iR8TZndP"
-                            "VCikflXYVMlMEJ2bJ2c0Swiq57ORJW6vQwnkxtPudpFRc7tNNDzz4LKEznJxAwGi6pBR7/co2IUgRw1"
-                            "ijLFTHWHQJOjgc7KaduHI0C6a+BJb4Y8IWuIk2u2qCMF1HNKFAUn/J1gTcqtIJcvK5uykpfJFCYc899"
-                            "TmUc8LMKI9nu57m0S44Y2hPPYeW4XSakScsg8bJHMkcXk3Tbs9b4eqiD+kHUhTS2BGfsHadR3d5j8lN"
-                            "hBPzA5e+mE==")
-            _mst_payload = json.dumps({
-                "magic": 538969122, "version": 1, "dataType": 8,
-                "strData": _mst_strdata, "tspFromClient": int(time.time() * 1000),
-            })
-            _r2 = requests.post("https://mssdk.bytedance.com/web/report",
-                                 data=_mst_payload, timeout=15,
-                                 headers={"Content-Type": "application/json", "User-Agent": _DOUYIN_UA})
-            msToken = _r2.cookies.get("msToken")
-        except Exception:
-            pass
-        if not msToken:
-            msToken = "".join(_rnd.choices(_str.ascii_letters + _str.digits, k=126)) + "=="
-
-        # 3. s_v_web_id
-        _base = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-        _ms = int(round(time.time() * 1000))
-        _b36 = ""
-        while _ms > 0:
-            _rem = _ms % 36
-            _b36 = (str(_rem) if _rem < 10 else chr(ord("a") + _rem - 10)) + _b36
-            _ms = int(_ms / 36)
-        _o = [""] * 36
-        _o[8] = _o[13] = _o[18] = _o[23] = "_"
-        _o[14] = "4"
-        for _i in range(36):
-            if not _o[_i]:
-                _n = int(_rnd.random() * len(_base))
-                if _i == 19:
-                    _n = 3 & _n | 8
-                _o[_i] = _base[_n]
-        s_v_web_id = "verify_" + _b36 + "_" + "".join(_o)
-
-        # 4. 组装 Cookie
-        cookie_parts = []
-        if ttwid:
-            cookie_parts.append(f"ttwid={ttwid}")
-        cookie_parts.append(f"msToken={msToken}")
-        cookie_parts.append(f"s_v_web_id={s_v_web_id}")
-        cookie_str = "; ".join(cookie_parts)
-
-        # 5. 写入 config.yaml（保留登录态字段，只更新 ttwid/msToken/s_v_web_id）
-        if os.path.isfile(_DY_V2_COOKIE_PATH):
-            with open(_DY_V2_COOKIE_PATH, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            existing_cookie = cfg.get("TokenManager", {}).get("douyin", {}).get("headers", {}).get("Cookie", "")
-            # 登录态关键字段：如果现有Cookie包含这些字段，说明用户配了登录Cookie，需要保留
-            _login_fields = ["sessionid", "sessionid_ss", "sid_guard", "sid_tt", "uid_tt", "uid_tt_ss",
-                             "passport_csrf_token", "n_mh", "odin_tt", "sid_ucp_v1", "ssid_ucp_v1"]
-            has_login = any(f in existing_cookie for f in _login_fields)
-            if has_login and existing_cookie:
-                # 合并：保留现有Cookie的所有字段，只替换 ttwid/msToken/s_v_web_id
-                _parts = {}
-                for _p in existing_cookie.split(";"):
-                    _p = _p.strip()
-                    if "=" in _p:
-                        _k, _v = _p.split("=", 1)
-                        _parts[_k.strip()] = _v.strip()
-                if ttwid:
-                    _parts["ttwid"] = ttwid
-                _parts["msToken"] = msToken
-                _parts["s_v_web_id"] = s_v_web_id
-                cookie_str = "; ".join(f"{_k}={_v}" for _k, _v in _parts.items())
-                print(f"🎬 [v2] Cookie 已刷新（保留登录态，更新ttwid/msToken）")
-            else:
-                print(f"🎬 [v2] Cookie 已自动刷新（ttwid={'有' if ttwid else '无'}, msToken={'真实' if msToken and len(msToken) in (120,128) else '虚假'}）")
-            cfg["TokenManager"]["douyin"]["headers"]["Cookie"] = cookie_str
-            with open(_DY_V2_COOKIE_PATH, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-            return True
-        else:
-            print(f"🎬 [v2] 配置文件不存在：{_DY_V2_COOKIE_PATH}")
-            return False
-    except Exception as e:
-        print(f"🎬 [v2] Cookie 刷新失败：{e}")
-        return False
-
-
-def douyin_parse_v2(raw_link):
-    """用 Douyin_TikTok_Download_API (HybridCrawler) 解析抖音作品，支持1080p。
-    返回 (title, is_video, video_url, images_list, headers, error_msg)，失败时 error_msg 非空。"""
-    raw_link = _clean_douyin_url(raw_link)
-    try:
-        from crawlers.hybrid.hybrid_crawler import HybridCrawler
-
-        async def _parse():
-            crawler = HybridCrawler()
-            return await crawler.hybrid_parsing_single_video(raw_link, minimal=False)
-
-        data = asyncio.run(_parse())
-        if not data:
-            return None, None, None, None, None, "v2解析返回空数据"
-
-        title = data.get("desc", "抖音作品")
-
-        # 图文作品（优先检查，因为图文作品的video字段可能也存在但无真实视频）
-        if "images" in data and data.get("images"):
-            images = []
-            for img in data["images"]:
-                url_list = img.get("url_list", [])
-                if url_list:
-                    images.append(url_list[0])
-            if not images:
-                return None, None, None, None, None, "v2解析未找到图片地址"
-            dy_headers = {"User-Agent": _DOUYIN_UA, "Referer": "https://www.douyin.com/"}
-            print(f"🎬 [v2] 图文作品，共{len(images)}张图片")
-            return title, False, None, images, dy_headers, None
-
-        # 视频作品
-        if "video" in data and data.get("video"):
-            video_data = data["video"]
-            bit_rates = video_data.get("bit_rate", []) or []
-            best_url = None
-            best_info = ""
-            # 按 bit_rate 降序选最高清晰度
-            if bit_rates:
-                sorted_br = sorted(bit_rates, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                for br in sorted_br:
-                    pa = br.get("play_addr", {})
-                    url_list = pa.get("url_list", [])
-                    if url_list:
-                        best_url = url_list[0]
-                        h = pa.get("height", 0)
-                        w = pa.get("width", 0)
-                        br_kbps = int(br.get("bit_rate", 0) / 1000)
-                        best_info = f"{w}x{h} ({br_kbps}kbps)"
-                        break
-            # 回退到默认 play_addr
-            if not best_url:
-                play_addr = video_data.get("play_addr", {})
-                url_list = play_addr.get("url_list", [])
-                if url_list:
-                    best_url = url_list[0]
-                    h = play_addr.get("height", 0)
-                    w = play_addr.get("width", 0)
-                    best_info = f"{w}x{h} (默认)"
-            if not best_url:
-                return None, None, None, None, None, "v2解析未找到视频地址"
-            print(f"🎬 [v2] 选择清晰度：{best_info}")
-            dy_headers = {"User-Agent": _DOUYIN_UA, "Referer": "https://www.douyin.com/"}
-            return title, True, best_url, [], dy_headers, None
-
-        else:
-            return None, None, None, None, None, "v2解析无法识别作品类型"
-
-    except Exception as e:
-        return None, None, None, None, None, f"v2解析异常：{e}"
-
-
-
-def douyin_parse_v3(raw_link):
-    """v3：移动分享页直链方案——绕过aweme/detail API风控。
-    移动UA+登录cookie访问iesdouyin分享页→提取item_list→playwm转play升1080p。
-    返回 (title, is_video, video_url, images_list, headers, error_msg)"""
-    raw_link = _clean_douyin_url(raw_link)
-    # 从v2配置读取当前cookie（共享登录态）
-    cookie_str = ""
-    try:
-        with open(_DY_V2_COOKIE_PATH, "r", encoding="utf-8") as _f:
-            _cfg = yaml.safe_load(_f)
-        cookie_str = _cfg.get("TokenManager", {}).get("douyin", {}).get("headers", {}).get("Cookie", "") or ""
-    except Exception:
-        pass
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
-                      "Mobile/15E148 Safari/604.1",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://www.douyin.com/",
-    })
-    if cookie_str:
-        for _part in cookie_str.split(";"):
-            _part = _part.strip()
-            if "=" in _part:
-                _k, _v = _part.split("=", 1)
-                try:
-                    s.cookies.set(_k.strip(), _v.strip(), domain=".douyin.com")
-                except Exception:
-                    pass
-    try:
-        resp = s.get(raw_link, allow_redirects=True, timeout=20)
-        final_url = str(resp.url)
-    except Exception as e:
-        return None, None, None, None, None, f"v3: 访问短链失败：{e}"
-    id_match = re.search(r'/(?:video|note|share)/(\d+)', final_url)
-    if not id_match:
-        return None, None, None, None, None, "v3: 无法提取作品ID"
-    aweme_id = id_match.group(1)
-    # 移动分享页
-    share_url = f"https://www.iesdouyin.com/share/video/{aweme_id}/"
-    try:
-        r2 = s.get(share_url, timeout=20)
-        html = r2.text
-    except Exception as e:
-        return None, None, None, None, None, f"v3: 访问移动分享页失败：{e}"
-    m = re.search(r'window\._ROUTER_DATA\s*=\s*(\{.*?\})\s*</script>', html, re.S)
-    if not m:
-        return None, None, None, None, None, "v3: 页面中未找到_ROUTER_DATA"
-    try:
-        data = json.loads(m.group(1))
-    except Exception as e:
-        return None, None, None, None, None, f"v3: JSON解析失败：{e}"
-
-    def _find(obj, depth=0):
-        if depth > 8:
-            return None
-        if isinstance(obj, dict):
-            if "videoInfoRes" in obj and isinstance(obj["videoInfoRes"], dict):
-                return obj["videoInfoRes"]
-            for _v in obj.values():
-                r = _find(_v, depth + 1)
-                if r:
-                    return r
-        elif isinstance(obj, list):
-            for _v in obj:
-                r = _find(_v, depth + 1)
-                if r:
-                    return r
-        return None
-
-    vir = _find(data)
-    if not vir:
-        return None, None, None, None, None, "v3: 未找到videoInfoRes"
-    items = vir.get("item_list") or []
-    if not items:
-        return None, None, None, None, None, "v3: item_list为空"
-    item = items[0]
-    title = item.get("desc", "抖音作品")
-    dy_headers = {"User-Agent": _DOUYIN_UA, "Referer": "https://www.douyin.com/"}
-    if cookie_str:
-        dy_headers["Cookie"] = cookie_str
-
-    # 图文作品
-    images = item.get("images") or []
-    if images:
-        img_urls = []
-        for img in images:
-            url_list = img.get("url_list", []) or []
-            if url_list:
-                img_urls.append(url_list[-1])
-        if not img_urls:
-            return None, None, None, None, None, "v3: 图文未找到图片URL"
-        print(f"🎬 [v3] 图文作品，共{len(img_urls)}张图片")
-        return title, False, None, img_urls, dy_headers, None
-
-    # 视频：playwm→play 无水印 + 升清晰度
-    video = item.get("video") or {}
-    play_addr = video.get("play_addr") or {}
-    url_list = play_addr.get("url_list") or []
-    if not url_list:
-        return None, None, None, None, None, "v3: 未找到视频URL"
-    best_url = url_list[0]
-    h = video.get("height") or play_addr.get("height") or 0
-    w = video.get("width") or play_addr.get("width") or 0
-    new_url = best_url.replace("/playwm/", "/play/")
-    if "ratio=" in new_url:
-        target = "1080p" if h and h >= 1080 else (f"{h}p" if h else "720p")
-        new_url = re.sub(r'ratio=\d+p', f'ratio={target}', new_url)
-    print(f"🎬 [v3] 视频：{w}x{h}（playwm→play 无水印）")
-    return title, True, new_url, [], dy_headers, None
-
 
 async def handle_douyin_download(websocket, chat_id, is_group, raw_link):
-    """解析抖音链接→下载视频/图文→发文件"""
+    """抖音：主程序只做【提交链接给解析容器 → 等它下载完 → 把文件上传到QQ】。
+    解析、签名、Cookie、下载全部在 douyin_tiktok_download_api 容器里完成，
+    抖音改版时只需更新那个容器，本文件不用动。"""
     if not ENABLE_DOWNLOAD:
         print(f"📥 下载总开关已关闭，拒绝抖音下载：{raw_link}")
         return
+
     async def notify(text):
         if is_group:
             await send_group_msg(websocket, chat_id, text)
         else:
             await send_private_msg(websocket, chat_id, text)
 
-    print(f"🎬 收到抖音链接：{raw_link}")
-    await notify("🎬 检测到抖音链接，正在解析...")
-
-    def _do_work():
-        # 只走v3（移动分享页直链），不调用被风控的aweme/detail API，避免IP被重点关注
-        title, is_video, video_url, images, headers, err = douyin_parse_v3(raw_link)
-        if err:
-            print(f"🎬 v3解析失败：{err}")
-        if err:
-            return None, err
-        # 去掉特殊字符和换行符，按字节截断到200字节以内（Linux文件名最大255字节，中文占3字节）
-        safe_title = re.sub(r'[\\/:*?"<>|\n\r\t]', "", title).strip()
-        safe_title = safe_title.encode('utf-8')[:200].decode('utf-8', errors='ignore') or "douyin_post"
-        dy_dir = os.path.join(DOWNLOAD_ROOT, "抖音")
-        os.makedirs(dy_dir, exist_ok=True)
-
-        if is_video:
-            save_path = os.path.join(dy_dir, f"{safe_title}.mp4")
-            if os.path.isfile(save_path) and os.path.getsize(save_path) > 1024:
-                print(f"🎬 {safe_title}.mp4 已存在，直接发送")
-                return save_path, None
-            print(f"🎬 正在下载抖音视频：{title}")
-            try:
-                res = requests.get(video_url, headers=headers, timeout=120, stream=True)
-                if res.status_code != 200:
-                    return None, f"视频下载失败，状态码：{res.status_code}"
-                with open(save_path, "wb") as f:
-                    for chunk in res.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-            except Exception as e:
-                return None, f"视频下载异常：{e}"
-            if not os.path.isfile(save_path) or os.path.getsize(save_path) < 1024:
-                return None, "视频文件不存在或过小"
-            return save_path, None
-        else:
-            zip_path = os.path.join(dy_dir, f"{safe_title}.zip")
-            if os.path.isfile(zip_path) and os.path.getsize(zip_path) > 1024:
-                print(f"🎬 {safe_title}.zip 已存在，直接发送")
-                return zip_path, None
-            print(f"🎬 抖音图文作品，共{len(images)}张图片，开始下载打包")
-            import zipfile, shutil
-            temp_dir = os.path.join(dy_dir, f"_tmp_{safe_title}")
-            os.makedirs(temp_dir, exist_ok=True)
-            try:
-                for idx, img_url in enumerate(images, 1):
-                    try:
-                        img_res = requests.get(img_url, headers=headers, timeout=35, stream=True)
-                        if img_res.status_code == 200:
-                            # 先下载到临时文件，再用Pillow统一转成png（抖音图片多为webp，png兼容性更好）
-                            tmp_path = os.path.join(temp_dir, f"{idx:02d}.tmp")
-                            with open(tmp_path, "wb") as f:
-                                for chunk in img_res.iter_content(chunk_size=512 * 1024):
-                                    if chunk:
-                                        f.write(chunk)
-                            try:
-                                from PIL import Image
-                                img = Image.open(tmp_path)
-                                # 处理透明通道：webp可能有alpha通道，转png时保留
-                                if img.mode in ("RGBA", "LA", "P"):
-                                    img = img.convert("RGBA")
-                                else:
-                                    img = img.convert("RGB")
-                                png_path = os.path.join(temp_dir, f"{idx:02d}.png")
-                                img.save(png_path, "PNG")
-                                img.close()
-                                os.remove(tmp_path)
-                            except Exception as e:
-                                # 转换失败则保留原始文件（改回原始扩展名）
-                                ct = img_res.headers.get("Content-Type", "")
-                                ext = ".jpg"
-                                if "png" in ct: ext = ".png"
-                                elif "webp" in ct: ext = ".webp"
-                                os.rename(tmp_path, os.path.join(temp_dir, f"{idx:02d}{ext}"))
-                                print(f"⚠️ 第{idx}张图片转png失败，保留原格式：{e}")
-                    except Exception as e:
-                        print(f"⚠️ 第{idx}张图片下载失败：{e}")
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for fname in sorted(os.listdir(temp_dir)):
-                        fpath = os.path.join(temp_dir, fname)
-                        if os.path.isfile(fpath):
-                            zf.write(fpath, fname)
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            if not os.path.isfile(zip_path) or os.path.getsize(zip_path) < 1024:
-                return None, "图文打包失败"
-            return zip_path, None
-
-    try:
-        final_path, err = await asyncio.to_thread(_do_work)
-    except Exception as e:
-        err = f"下载异常：{e}"
-        final_path = None
-
-    if err or not final_path:
-        await notify(f"❌ 抖音下载失败：{err or '未知错误'}")
+    if not ENABLE_DOUYIN_API:
+        await notify("❌ 抖音解析服务已关闭（enable_douyin_api=false）")
+        return
+    if not DOUYIN_API_BASE:
+        await notify("❌ 抖音解析服务未配置（douyin_api_base 为空），暂时无法解析抖音链接")
         return
 
-    file_name = os.path.basename(final_path)
-    # NTQQ群文件上传对长文件名/特殊字符敏感，清洗显示名（不改文件路径）
-    upload_name = re.sub(r'[#\\/:*?"<>|]', '', file_name).strip()
-    upload_name = re.sub(r'\s+', ' ', upload_name)
-    if len(upload_name) > 50:
-        _n, _e = os.path.splitext(upload_name)
-        upload_name = _n[:45] + _e
-    print(f"🎬 抖音下载完成：{final_path}")
-    # v2下载的1080p视频文件头/元数据可能异常，导致NTQQ报rich media transfer failed，用ffmpeg重新封装修复
-    _repacked = await asyncio.to_thread(_repack_video_with_ffmpeg, final_path)
-    if _repacked:
-        final_path = _repacked
-    ok = await send_chat_file(websocket, is_group, chat_id, final_path, upload_name)
-    if not ok:
-        await notify(f"❌ 抖音文件发送失败，文件已存服务端：{final_path}")
-    else:
-        print(f"✅ 抖音视频已发送")
-        # 抖音视频文件大，发送成功后立即删除原始文件，不占磁盘空间（不缓存，重复请求重新下载）
+    print(f"🎬 收到抖音链接，提交解析服务：{raw_link}")
+    await notify("🎬 已提交解析服务，下载完成后会自动发送…")
+
+    async def worker():
         try:
-            if os.path.isfile(final_path):
-                os.remove(final_path)
-                print(f"🗑️ 抖音视频已发送，删除原始文件：{final_path}")
+            # 1) 提交任务给解析容器
+            started = await asyncio.to_thread(
+                douyin_dtk.start_download, DOUYIN_API_BASE, DOUYIN_API_KEY, raw_link)
+            if started.get("err"):
+                await notify(f"❌ 抖音提交失败：{started['err']}")
+                return
+            download_id = started["download_id"]
+            print(f"🎬 解析任务已创建：{download_id}（state={started.get('state')}）")
+
+            # 2) 等解析容器把文件下好
+            result = await asyncio.to_thread(
+                douyin_dtk.wait_download, DOUYIN_API_BASE, DOUYIN_API_KEY, download_id,
+                timeout=DOUYIN_JOB_TIMEOUT, interval=DOUYIN_POLL_INTERVAL)
+            if result.get("err"):
+                await notify(f"❌ 抖音解析失败：{result['err']}")
+                return
+            state = str(result.get("state") or "")
+            files = result.get("files") or []
+            pick = douyin_dtk.pick_media(files)
+            if state not in ("done", "completed", "success") or (not pick["video"] and not pick["images"]):
+                await notify(f"❌ 抖音解析未成功（state={state or '未知'}）")
+                return
+            directory = result.get("directory") or ""
+
+            # 3) 把文件取回本地（优先读共享 media 目录，读不到再走 API）
+            dy_dir = os.path.join(DOWNLOAD_ROOT, "抖音")
+            os.makedirs(dy_dir, exist_ok=True)
+
+            def _fetch_all():
+                got = []
+                names = [pick["video"]] if pick["video"] else list(pick["images"])
+                for name in names:
+                    base_name = os.path.basename(str(name))
+                    dest = os.path.join(dy_dir, f"{download_id}_{base_name}")
+                    r = douyin_dtk.fetch_file(
+                        DOUYIN_API_BASE, DOUYIN_API_KEY, download_id, str(name), dest,
+                        media_dir=DOUYIN_MEDIA_DIR, directory=directory)
+                    if r.get("err"):
+                        print(f"⚠️ 取回 {name} 失败：{r['err']}")
+                    else:
+                        got.append(r["path"])
+                return got
+
+            local_files = await asyncio.to_thread(_fetch_all)
+            if not local_files:
+                await notify("❌ 抖音文件取回失败（检查解析服务的 media 卷是否挂到本容器，或 API 取回是否可用）")
+                return
+
+            # 4) 组装并上传：视频直接发；多图打包成 zip
+            send_path = local_files[0]
+            if not pick["video"] and len(local_files) > 1:
+                send_path = await asyncio.to_thread(_zip_images_for_upload, local_files, dy_dir, download_id)
+
+            upload_name = re.sub(r'[#\\/:*?"<>|]', "", os.path.basename(send_path)).strip()
+            upload_name = re.sub(r'\s+', " ", upload_name)
+            if len(upload_name) > 50:
+                _n, _e = os.path.splitext(upload_name)
+                upload_name = _n[:45] + _e
+
+            if pick["video"]:
+                _repacked = await asyncio.to_thread(_repack_video_with_ffmpeg, send_path)
+                if _repacked:
+                    send_path = _repacked
+
+            ok = await send_chat_file(websocket, is_group, chat_id, send_path, upload_name)
+            if not ok:
+                await notify(f"❌ 抖音文件发送失败，文件已存服务端：{send_path}")
+                return
+            print("✅ 抖音文件已发送")
+            # 发送成功后清理本地临时文件（解析服务自己媒体卷的清理由它的容量策略负责）
+            for p in set(local_files + [send_path]):
+                try:
+                    if os.path.isfile(p):
+                        os.remove(p)
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"⚠️ 删除抖音视频文件失败：{e}")
+            print(f"❌ 抖音后台任务异常：{e}")
+            await notify(f"❌ 抖音处理异常：{e}")
+
+    # 调用方(spawn_link_download)已经把它放进后台任务并做了"同链接去重"，这里直接执行
+    await worker()
 
 
-# ===================== DSML工具调用解析（部分模型会输出DSML而不是tool_calls） =====================
+def _zip_images_for_upload(paths, out_dir, tag):
+    """把解析服务下好的多张图片打包成zip（尽量转png提高兼容性，失败保留原格式）"""
+    import zipfile, shutil
+    tmp = os.path.join(out_dir, f"_tmp_{tag}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp, exist_ok=True)
+    zip_path = os.path.join(out_dir, f"抖音图文_{tag}.zip")
+    try:
+        for i, p in enumerate(paths, 1):
+            ext = os.path.splitext(p)[1] or ".jpg"
+            try:
+                from PIL import Image
+                im = Image.open(p)
+                im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") else im.convert("RGB")
+                im.save(os.path.join(tmp, f"{i:02d}.png"), "PNG")
+                im.close()
+            except Exception:
+                try:
+                    shutil.copy2(p, os.path.join(tmp, f"{i:02d}{ext}"))
+                except Exception:
+                    pass
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in sorted(os.listdir(tmp)):
+                fp = os.path.join(tmp, name)
+                if os.path.isfile(fp):
+                    zf.write(fp, name)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return zip_path
+
+
 _DSML_INVOKE_RE = re.compile(r'<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>', re.S)
 _DSML_PARAM_RE = re.compile(r'<parameter\s+name="([^"]+)"[^>]*>(.*?)</parameter>', re.S)
 
@@ -4287,7 +3871,8 @@ def _load_config_file():
     global ONEBOT_WS, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_VISION_MODEL, BOCHA_API_KEY
     global MAX_CONTEXT_LEN, COOLDOWN, ALLOWED_GROUPS, ALLOWED_USERS
     global ENABLE_WEB_SEARCH, ENABLE_NOTIFY, SEARCH_RESULT_NUM, SYSTEM_PROMPT
-    global DOWNLOAD_ROOT, _CONVERT_DIR, IMG_SUFFIX, ZIP_PASSWORD, MAX_SEND_MB, DEFAULT_CHAPTER, DOUYIN_TTWID
+    global DOWNLOAD_ROOT, _CONVERT_DIR, IMG_SUFFIX, ZIP_PASSWORD, MAX_SEND_MB, DEFAULT_CHAPTER
+    global ENABLE_DOUYIN_API, DOUYIN_API_BASE, DOUYIN_API_KEY, DOUYIN_POLL_INTERVAL, DOUYIN_JOB_TIMEOUT, DOUYIN_MEDIA_DIR
     global SEND_FILE_AS_CHAT_MSG, UPLOAD_CLEANUP, UPLOAD_CLEANUP_DELAY_SECONDS
     global NAPCAT_CONTAINER, NAPCAT_DATA_DIR, NAPCAT_HOST_DIR, NAPCAT_VIEW_DIR
     global CONTROLLER_ALLOWED_USERS
@@ -4435,7 +4020,13 @@ def _load_config_file():
     IMG_SUFFIX = s("img_suffix", IMG_SUFFIX)
     ZIP_PASSWORD = s("zip_password", ZIP_PASSWORD)
     MAX_SEND_MB = i("max_send_mb", MAX_SEND_MB)
-    DOUYIN_TTWID = s("douyin_ttwid", DOUYIN_TTWID)
+    # 抖音：解析/下载全部交给外部容器，这里只读它的地址与Key
+    ENABLE_DOUYIN_API = b("enable_douyin_api", ENABLE_DOUYIN_API)
+    DOUYIN_API_BASE = os.environ.get("QQ2_DOUYIN_API_BASE") or s("douyin_api_base", DOUYIN_API_BASE)
+    DOUYIN_API_KEY = os.environ.get("QQ2_DOUYIN_API_KEY") or s("douyin_api_key", DOUYIN_API_KEY)
+    DOUYIN_POLL_INTERVAL = f("douyin_poll_interval", DOUYIN_POLL_INTERVAL)
+    DOUYIN_JOB_TIMEOUT = i("douyin_job_timeout", DOUYIN_JOB_TIMEOUT)
+    DOUYIN_MEDIA_DIR = os.environ.get("QQ2_DOUYIN_MEDIA_DIR") or s("douyin_media_dir", DOUYIN_MEDIA_DIR)
     SEND_FILE_AS_CHAT_MSG = b("send_file_as_chat_msg", SEND_FILE_AS_CHAT_MSG)
     UPLOAD_CLEANUP = b("upload_cleanup", UPLOAD_CLEANUP)
     UPLOAD_CLEANUP_DELAY_SECONDS = i("upload_cleanup_delay_seconds", UPLOAD_CLEANUP_DELAY_SECONDS)
@@ -4497,3 +4088,5 @@ if __name__ == "__main__":
         except:
             pass
         sys.stdout.write("日志已保存：QQKZT.txt（控制台）、QQLT.txt（聊天记录）\n")
+
+

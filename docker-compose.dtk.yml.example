@@ -1,0 +1,48 @@
+# 抖音解析服务（可并入 bot 的 docker-compose.yml，也可单独 `docker compose -f 本文件 up -d`）
+#
+# 用法：
+#   1) cp docker-compose.dtk.yml.example docker-compose.dtk.yml
+#   2) 二选一：
+#      A. 方案B（推荐，自托管 v5，自带自愈身份池）：
+#         直接按上游文档跑它自己的 compose（见 README-Douyin.md），
+#         本文件里把 dtk 服务注释掉，只保留 watchtower，并把 dtk 的网络接入 qqbot。
+#      B. 方案C（过渡，v4 单镜像，接口开放无需 key）：
+#         直接用下面的 dtk 服务；bot 里 douyin_api_path 填 /api/hybrid/video_data
+#   3) bot 侧 qqbot-config.yml：
+#        enable_douyin_api: true
+#        douyin_api_base: "http://dtk-api:80"      # 同网络用服务名
+#        douyin_api_path: "/api/hybrid/video_data" # v4；v5 用 /api/v1/douyin/video
+#
+# 说明：解析失败时 bot 会自动回退本地 v3/v5，所以这里挂了也不会全废。
+
+services:
+  # ---- 方案C：v4 单镜像（过渡用；抖音改版后不一定有人修）----
+  dtk:
+    image: evil0ctal/douyin_tiktok_download_api:V4.1.2
+    container_name: dtk-api
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "8080:80"          # 宿主机8080 → 容器80；只在需要主机直连时暴露
+    networks:
+      - qqbot
+
+  # ---- 自动升级：只盯解析服务，上游一发修复就更新（真正一劳永逸）----
+  # 若解析服务是单独一套 compose 跑的，把这里改成对应的容器名即可
+  watchtower:
+    image: containrrr/watchtower
+    container_name: dtk-watchtower
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 86400 --cleanup dtk-api
+    networks:
+      - qqbot
+
+networks:
+  qqbot:
+    external: true
+    name: qqbot_qqbot     # 与 bot 的 docker-compose 网络名保持一致（可用 docker network ls 确认）
