@@ -70,3 +70,13 @@ infra.dll
 # 测试脚本
 test_*.py
 *_test.py
+
+# 旧爬虫代码（已改用DTK独立解析服务）
+crawlers/
+
+# 内部工具脚本
+get_douyin_login_cookie.py
+
+# 内部文档（不给公开仓库）
+安全提交.md
+*.md.local
