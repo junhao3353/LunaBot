@@ -63,3 +63,10 @@ infra.dll
 *.zip
 *.mp4
 *.mp3
+
+# 表情包（本地资源，不提交）
+表情包/
+
+# 测试脚本
+test_*.py
+*_test.py
