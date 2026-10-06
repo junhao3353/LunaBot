@@ -45,6 +45,25 @@ resolver/
 docker-compose.dtk.yml
 !docker-compose.dtk.yml.example
 
+# 各类密钥/口令文件（绝不提交）
+dtk_secret.txt
+*_secret.txt
+*secret*.txt
+*.secret
+*.key
+*.pem
+balance_history.json
+stats.json
+# WebUI 访问令牌文件（含明文令牌，绝不提交）
+webui_token.txt
+*token*.txt
+*_token.txt
+*.token
+# 配置备份与临时文件（WebUI 保存配置时生成）
+qqbot-config.yml.bak
+*.yml.bak
+*.tmp
+
 # 用户数据（隐私，不提交）
 memory/
 transfer/

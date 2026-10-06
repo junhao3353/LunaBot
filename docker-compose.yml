@@ -57,7 +57,7 @@ services:
       - ./transfer:/deliver            # 与napcat共享的待传目录
       - ./memory:/app/memory           # 永久记忆存档目录（memory.json，重启不丢，可宿主机直接编辑）
       - ./表情包:/app/emoji:ro          # AI表情包目录（只读，文件名去扩展名=表情描述，AI自主选发）
-      - ./qqbot-config.yml:/app/qqbot-config.yml:ro   # 配置只读挂载，改文件后重启容器生效
+      - ./qqbot-config.yml:/app/qqbot-config.yml:ro   # 配置只读挂载（bot 不需要写；WebUI 在 controller 那边以读写挂载）
       - ./QQ_AI_Bot.py:/app/QQ_AI_Bot.py                  # 代码挂载：PyCharm改宿主机QQ_AI_Bot.py，容器实时同步，重启即生效（开发用，免build）
       - ./douyin_dtk.py:/app/douyin_dtk.py                # 抖音解析服务客户端（与主程序一起挂载，改完重启即生效）
       - model-cache:/root/.cache/modelscope  # SenseVoice模型缓存持久化（936MB，只下一次）
@@ -66,8 +66,7 @@ services:
       # - dtk-media:/dtk_media:ro
     networks:
       - qqbot
-      # 可选：接入解析服务的 docker 网络（解析栈先起，再执行 docker network connect dtk_default qq-bot）
-      # - dtk-net
+      - dtk_data
 
   controller:
     build:
@@ -85,9 +84,20 @@ services:
       - CTRL_CONTAINER_AI=qq-bot
       - CTRL_CONTAINER_NAPCAT=qq-napcat
       - CTRL_CONTAINER_SELF=qq-controller
+      # WebUI（配置界面）：端口与访问令牌都在 qqbot-config.yml 的 controller 段
+      - CTRL_WEBUI_PORT=6650
+      - CTRL_WEBUI_TOKEN=${CTRL_WEBUI_TOKEN:-}   # 留空则启动时自动生成强令牌（≥32位）并写入配置文件
+      - CTRL_TOKEN_FILE=/app/webui_token.txt     # 令牌文件路径（bind mount 到项目目录，忘记令牌时查看）
+    ports:
+      - "6650:6650"   # WebUI 访问端口：http://NAS_IP:6650/
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # 挂载Docker socket，让容器能控制宿主机Docker
-      - ./qqbot-config.yml:/app/qqbot-config.yml:ro   # 配置只读挂载，改文件后重启容器生效
+      - ./qqbot-config.yml:/app/qqbot-config.yml   # 配置读写挂载（WebUI 保存需要写入；会原子替换+自动备份）
+      - ./QQ_Controller.py:/app/QQ_Controller.py      # 代码挂载：改完重启容器即生效（免build）
+      - ./webui-dashboard.html:/app/webui-dashboard.html  # WebUI前端挂载：改完重启容器即生效
+      - ./webui_token.txt:/app/webui_token.txt  # WebUI令牌文件（忘记令牌时在项目目录查看）
+      # 统计数据（主程序写 stats.json，供仪表盘展示；bot-data 卷与 qq-bot 共用）
+      - bot-data:/data
     networks:
       - qqbot
 
@@ -105,7 +115,6 @@ volumes:
 
 networks:
   qqbot:
-  # 可选：解析服务的网络（解析栈默认项目名 dtk → 网络名 dtk_default）
-  # dtk-net:
-  #   external: true
-  #   name: dtk_default
+  dtk_data:
+    external: true
+    name: dtk_data

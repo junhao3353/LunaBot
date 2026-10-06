@@ -51,6 +51,29 @@ docker compose down                # 全部停止（volume数据保留）
 docker compose up -d --build qqbot # 改代码后重建
 ```
 
+## WebUI（配置界面）
+
+控制器（`qq-controller`）内置了一个 WebUI 服务，用于在浏览器里查看/修改配置（仪表盘 + 系统提示词/连接/模型配置）。
+
+| 项 | 说明 |
+|---|---|
+| 地址 | `http://NAS_IP:6650/`（compose 已映射 `6650:6650`）→ 打开就是**登录页**，输入令牌即可 |
+| 令牌 | 没有单独"关闭校验"的开关：配置为空就自动生成 32 位强令牌并写入 `qqbot-config.yml`；自定义令牌建议 **≥16 位**（短于 8 位会被自动替换，8–15 位会提示） |
+| 查看令牌 | 项目目录下的 `webui_token.txt`（容器内 `/app/webui_token.txt`，权限 600，**已被 .gitignore 忽略**），或看 `qqbot-config.yml` 的 `controller.webui_token` |
+| 登录方式 | 登录页提交 → 下发 `HttpOnly; SameSite=Strict` Cookie（30 天）；也支持请求头 `X-WebUI-Token`；旧式 `?token=` 仍可用（会 302 跳转并把令牌从地址栏去掉） |
+| 防爆破 | 同一 IP 连续 5 次错误令牌 → 锁定 **300 秒**（返回 429），已有会话不受影响；失败尝试会写日志 |
+| 仪表盘内容 | API调用次数、今日消耗余额（DeepSeek 实时余额）、容器状态、NapCat 反向连接状态、近30天消耗柱状图 |
+| 数据来源 | `stats.json`（路径 `controller.stats_file`，默认 `/data/stats.json`，由主程序写入）+ DeepSeek 余额接口；**接口不可用时页面顶部会显示"演示数据"警示条**（不会静默显示假数据） |
+| 密钥显示 | **接口不回显明文**（页面显示"已设置"提示）：输入框留空=保持不变，输入 `__CLEAR__`=清空 |
+| 保存行为 | 原子写入 + 自动备份 `qqbot-config.yml.bak`；有 `ruamel.yaml` 时保留注释与格式 |
+| 应用并重启 | 按钮会重启 `qq-bot` 容器（等同群里的"重启服务 ai"） |
+
+安全设计：所有接口都要求令牌（登录页除外）；登录失败限速；POST 只接受同源 JSON（CSRF 防护）；
+`/api/history/{days}` 上限 365 天；密钥类字段写入前有范围/格式校验；页面不引用任何外部 CDN（离线 NAS 也能秒开）。
+
+安全提示：WebUI 端口**不要暴露到公网**；如需外网访问请走反向代理 + HTTPS，并把 `webui_token` 设成固定强值。
+`webui_token.txt` 与 `qqbot-config.yml` 都在 `.gitignore` 里——**别手动 `git add -f` 它们**。
+
 ## 数据与磁盘
 
 | 路径 | 用途 | 清理策略 |

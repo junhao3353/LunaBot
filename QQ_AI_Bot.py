@@ -41,6 +41,7 @@ import html
 import zipfile
 import subprocess
 import time
+import threading
 import random
 import yaml
 from collections import defaultdict
@@ -73,9 +74,78 @@ def _post_json(url, headers, payload, timeout, what="接口"):
     except Exception as e:
         raise RuntimeError(f"{what}请求失败：{e}")
     try:
-        return resp.json()
+        res_json = resp.json()
     except Exception:
         raise RuntimeError(f"{what}返回非JSON（HTTP {getattr(resp, 'status_code', '?')}）：{str(getattr(resp, 'text', ''))[:200]}")
+    # 统计DeepSeek API调用次数和token消耗（供WebUI仪表盘展示）
+    if "api.deepseek.com" in url:
+        _record_api_usage(res_json)
+    return res_json
+
+
+# ===================== API调用统计（纯计数，供WebUI仪表盘） =====================
+_stats_lock = threading.Lock()
+_stats_cache = {"deepseek_calls": 0, "vision_calls": 0, "volcengine_calls": 0, "websearch_calls": 0}
+_STATS_PATH = os.environ.get("QQ_STATS_FILE", "/data/stats.json")
+_STATS_FLUSH_COUNTER = {"n": 0}
+_STATS_FLUSH_EVERY = 10  # 每N次调用落盘一次
+
+
+def _load_stats():
+    """启动时加载stats.json"""
+    global _stats_cache
+    try:
+        if os.path.exists(_STATS_PATH):
+            with open(_STATS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k in _stats_cache:
+                _stats_cache[k] = int(data.get(k, 0))
+            total = sum(_stats_cache.values())
+            print(f"📊 已加载统计：主模型 {_stats_cache['deepseek_calls']}次 / 视觉 {_stats_cache['vision_calls']}次 / 火山 {_stats_cache['volcengine_calls']}次 / 搜索 {_stats_cache['websearch_calls']}次")
+    except Exception as e:
+        print(f"⚠️ 加载统计失败：{e}")
+
+
+def _flush_stats():
+    """原子写入stats.json（先写临时文件再替换，避免读到半个文件）"""
+    try:
+        d = os.path.dirname(_STATS_PATH)
+        if d:
+            os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        tmp_path = _STATS_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_stats_cache, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, _STATS_PATH)
+    except Exception as e:
+        print(f"⚠️ 写入统计失败：{e}")
+
+
+def _increment_stat(key):
+    """累加某类API调用次数（key: deepseek_calls / volcengine_calls / websearch_calls）
+    每 _STATS_FLUSH_EVERY 次落盘一次，避免每次调用都写盘（NAS上频繁写盘很浪费）"""
+    if key not in _stats_cache:
+        return
+    with _stats_lock:
+        _stats_cache[key] += 1
+        _STATS_FLUSH_COUNTER["n"] += 1
+        if _STATS_FLUSH_COUNTER["n"] >= _STATS_FLUSH_EVERY:
+            _STATS_FLUSH_COUNTER["n"] = 0
+            _flush_stats()
+
+
+def _record_api_usage(res_json):
+    """DeepSeek API调用后触发（兼容旧调用点，等价于_increment_stat("deepseek_calls")）"""
+    if isinstance(res_json, dict) and (res_json.get("usage") or res_json.get("choices")):
+        _increment_stat("deepseek_calls")
+
+
+# 启动时加载已有统计数据
+_load_stats()
 
 
 def _build_chat_data(model, messages, thinking_enabled):
@@ -183,6 +253,10 @@ SPLIT_DELAY_MAX = 2.0          # 段与段之间的随机延迟上限（秒）
 SPLIT_MAX_PARTS = 3            # 最多拆成几条：算出来超过这个数就【不拆】，整条一次发出（防太碎/太人机）
 SPLIT_PART_MAX_LEN = 100       # 单段超过该字数时再按句号等标点细拆
 USE_CHAT_MODEL_FOR_VISION = False  # true=图片识别也用语言模型（V4.1原生多模态），false=用单独的视觉模型（原逻辑）
+# ---- 群聊自由聊天：没@也能主动接话 ----
+ENABLE_RANDOM_CHAT = False       # 总开关
+CHAT_TRIGGER_PROBABILITY = 0.15  # 每条没@的群消息触发判断的概率
+_random_follow_up = False          # 对话延续：刚回复完一轮，下一条100%触发自由聊天判断
 
 # ---- AI回复转语音（edge-tts，免费在线合成；true=所有AI回复都发成语音条，false=原文本逻辑） ----
 ENABLE_TTS = False             # 总开关（配置文件 enable_tts 覆盖）
@@ -235,6 +309,236 @@ REPLY_STYLE_PROMPT = """
 """
 # ==================================================================
 
+# ===================== 群成员自动获取与按需注入 =====================
+GROUP_MEMBERS_FILE = os.environ.get("QQ_GROUP_MEMBERS_FILE", "/data/group_members.json")
+_group_members_cache = {}  # {group_id: {user_id: {"nickname": "", "card": "", "role": ""}}}
+_group_names_cache = {}    # {group_id: "群名称"}
+_group_members_loaded = False
+_current_cq_msg = ""   # 当前处理的消息CQ码（用于提取@对象）
+_current_raw_msg = ""  # 当前处理的消息原始文本
+
+def _load_group_members():
+    """启动时从本地缓存加载群成员列表"""
+    global _group_members_cache, _group_members_loaded
+    try:
+        if os.path.exists(GROUP_MEMBERS_FILE):
+            with open(GROUP_MEMBERS_FILE, "r", encoding="utf-8") as f:
+                _group_members_cache = json.load(f)
+            # key转成int
+            _group_members_cache = {int(g): {int(u): v for u, v in m.items()} for g, m in _group_members_cache.items()}
+            total = sum(len(m) for m in _group_members_cache.values())
+            print(f"👥 群成员缓存已加载：{len(_group_members_cache)}个群，共{total}人")
+    except Exception as e:
+        print(f"⚠️ 群成员缓存加载失败（可忽略）：{e}")
+    _group_members_loaded = True
+
+def _save_group_members():
+    """保存群成员列表到本地缓存"""
+    try:
+        d = os.path.dirname(GROUP_MEMBERS_FILE)
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        with open(GROUP_MEMBERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_group_members_cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 群成员缓存保存失败（可忽略）：{e}")
+
+async def _fetch_group_members(websocket, group_id: int):
+    """拉取单个群的成员列表+群名，更新缓存"""
+    try:
+        # 顺便拉群名
+        try:
+            ginfo = await api_call(websocket, "get_group_info", {"group_id": group_id}, timeout=8)
+            if ginfo.get("retcode") == 0:
+                _group_names_cache[group_id] = (ginfo.get("data") or {}).get("group_name", "")
+        except Exception:
+            pass
+        resp = await api_call(websocket, "get_group_member_list", {"group_id": group_id}, timeout=15)
+        if resp.get("retcode") == 0:
+            members = resp.get("data", []) or []
+            _group_members_cache[group_id] = {}
+            for m in members:
+                uid = m.get("user_id")
+                if uid:
+                    _group_members_cache[group_id][int(uid)] = {
+                        "nickname": m.get("nickname", ""),
+                        "card": m.get("card", ""),
+                        "role": m.get("role", "member"),
+                        "title": m.get("title", ""),
+                    }
+            print(f"👥 群{group_id}成员已更新：{len(members)}人")
+            return True
+        else:
+            print(f"⚠️ 拉取群{group_id}成员失败：{resp.get('msg') or resp}")
+    except Exception as e:
+        print(f"⚠️ 拉取群{group_id}成员异常：{e}")
+    return False
+
+async def _fetch_all_group_members(websocket):
+    """拉取所有白名单群的成员列表"""
+    for gid in ALLOWED_GROUPS:
+        await _fetch_group_members(websocket, gid)
+    _save_group_members()
+
+async def _group_members_refresh_loop(websocket):
+    """每小时刷新一次群成员列表的后台任务"""
+    while True:
+        await asyncio.sleep(3600)  # 1小时
+        try:
+            await _fetch_all_group_members(websocket)
+        except Exception as e:
+            print(f"⚠️ 群成员定时刷新异常：{e}")
+
+def _extract_mentioned_users(cq_msg: str, raw_msg: str) -> list:
+    """从消息中提取所有被@的QQ号（去重，保持顺序）"""
+    mentioned = []
+    import re
+
+    def _add(digits: str):
+        # 安全：QQ号最多12位；超长数字串直接忽略（Python 3.11+ int() 有4300位限制，会抛异常）
+        if not digits or len(digits) > 12:
+            return
+        try:
+            uid = int(digits)
+        except Exception:
+            return
+        if uid not in mentioned:
+            mentioned.append(uid)
+
+    # CQ码格式：[CQ:at,qq=123456]
+    for m in re.finditer(r'\[CQ:at,qq=(\d+)\]', cq_msg):
+        _add(m.group(1))
+    # 纯文本格式：@123456
+    for m in re.finditer(r'@(\d{2,})', raw_msg):
+        _add(m.group(1))
+    return mentioned
+
+async def _should_reply_random(ws, group_id: int, user_id: int, text: str) -> bool:
+    """自由聊天判断：用简短prompt问AI这条群消息要不要接话。返回True=要回复，False=静默。"""
+    if not text or len(text.strip()) < 1:
+        return False
+    # 过滤无文字消息（纯图片/表情/空消息），不触发自由聊天判断
+    if text.strip() in ("[无文字]", "无文字"):
+        return False
+    try:
+        _name = str(user_id)
+        if group_id in _group_members_cache:
+            _info = _group_members_cache[group_id].get(user_id, {})
+            _name = _info.get("card") or _info.get("nickname") or str(user_id)
+        _ctx_lines = _ambient_peek(group_id, limit=5)
+        _ctx = ("最近群聊：\n" + "\n".join(_ctx_lines) + "\n") if _ctx_lines else ""
+        judge_prompt = f"{_ctx}{_name}说：{text[:100]}\n\n你是群里的AI，判断要不要接这句话。以下情况要回复：在问你问题、寻求帮助、提到你、跟你说话、需要你参与讨论。以下情况可以不回复：纯自言自语、无意义内容、明显在跟别人说话。只回复一个字：要或不要。"
+        _headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+        # 注入系统提示词（人设），让AI根据自己的性格判断要不要接话（截断到500字避免浪费）
+        _sys_prompt = (SYSTEM_PROMPT[:500] + "…") if len(SYSTEM_PROMPT) > 500 else SYSTEM_PROMPT
+        _judge_sys = _sys_prompt + "\n\n【任务】根据你的人设，判断这条群消息你要不要接话回复。以下情况要回复：在问你问题、寻求帮助、提到你、跟你说话、需要你参与讨论、符合你性格想吐槽的。以下情况可以不回复：纯自言自语、无意义内容、明显在跟别人说话、你不感兴趣的话题。只回复一个字：要或不要，不要解释。"
+        _payload = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": _judge_sys},
+                {"role": "user", "content": judge_prompt}
+            ],
+            "thinking": {"type": "disabled"},
+            "max_tokens": 10,
+            "temperature": 0.3
+        }
+        def _do_post():
+            return _post_json("https://api.deepseek.com/v1/chat/completions", _headers, _payload, 10, "自由聊天判断")
+        data = await asyncio.to_thread(_do_post)
+        answer = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+        result = "要" in answer and "不要" not in answer
+        print(f"💬 自由聊天判断：{_name}说「{text[:30]}...」→ {'接话' if result else '静默'}（AI：{answer}）")
+        return result
+    except Exception as e:
+        print(f"⚠️ 自由聊天判断出错，默认静默：{e}")
+        return False
+
+
+def _build_related_members_block(group_id: int, speaker_id: int, cq_msg: str, raw_msg: str) -> str:
+    """构造相关人员信息块：发言人 + 所有被@的人，只注入这些人的信息"""
+    if group_id not in _group_members_cache:
+        return ""
+    members = _group_members_cache[group_id]
+    # 收集相关人员：发言人 + 被@的人
+    related = []
+    if speaker_id not in related:
+        related.append(speaker_id)
+    for uid in _extract_mentioned_users(cq_msg, raw_msg):
+        if uid not in related:
+            related.append(uid)
+    # 构造信息
+    lines = []
+    for uid in related:
+        info = members.get(uid)
+        if info:
+            name = info.get("card") or info.get("nickname") or str(uid)
+            role = info.get("role", "member")
+            role_tag = ""
+            if role == "owner":
+                role_tag = "（群主）"
+            elif role == "admin":
+                role_tag = "（管理员）"
+            title = info.get("title", "")
+            title_tag = f"[{title}]" if title else ""
+            lines.append(f"{uid}：{name}{role_tag}{title_tag}")
+        else:
+            lines.append(f"{uid}：（未知成员）")
+    if not lines:
+        return ""
+    group_name = _group_names_cache.get(group_id, "")
+    group_name_str = f"群名称：{group_name}，" if group_name else ""
+    member_count = len(members)
+    block = f"\n【当前群信息】{group_name_str}群号：{group_id}，群成员共{member_count}人\n"
+    block += "【相关人员】（只有本轮消息涉及的人，需要了解其他人可后续调用群成员查询工具）\n"
+    block += "\n".join(lines)
+    return block
+
+
+def _query_group_member(group_id: int, query: str) -> str:
+    """查询群成员，支持QQ号/昵称/群名片模糊匹配。找到返回详细信息，没找到返回查无此人。"""
+    if group_id not in _group_members_cache:
+        return "群成员缓存未加载，请稍后再试。"
+    members = _group_members_cache[group_id]
+    query = str(query or "").strip()
+    if not query:
+        return "查询关键词为空，请提供要查询的QQ号、昵称或群名片。"
+
+    results = []
+    # 1. QQ号精确匹配（安全：限制长度并容错，超长数字串不解析）
+    if query.isdigit() and len(query) <= 12:
+        try:
+            uid = int(query)
+        except Exception:
+            uid = None
+        if uid is not None and uid in members:
+            info = members[uid]
+            name = info.get("card") or info.get("nickname") or str(uid)
+            role = info.get("role", "member")
+            role_tag = "群主" if role == "owner" else ("管理员" if role == "admin" else "普通成员")
+            title = info.get("title", "")
+            title_str = f"\n专属头衔：{title}" if title else ""
+            results.append(f"QQ号：{uid}\n昵称：{info.get('nickname','')}\n群名片：{info.get('card','')}\n身份：{role_tag}{title_str}")
+
+    # 2. 昵称/群名片模糊匹配（最多返回5个）
+    if not results:
+        for uid, info in members.items():
+            card = info.get("card") or ""
+            nick = info.get("nickname") or ""
+            if query in card or query in nick:
+                role = info.get("role", "member")
+                role_tag = "群主" if role == "owner" else ("管理员" if role == "admin" else "普通成员")
+                results.append(f"QQ号：{uid}\n昵称：{nick}\n群名片：{card}\n身份：{role_tag}")
+                if len(results) >= 5:
+                    break
+
+    if not results:
+        return f"查无此人：群里没有叫「{query}」的成员。"
+    if len(results) == 1:
+        return results[0]
+    return f"找到{len(results)}个匹配成员：\n" + "\n---\n".join(results)
+
+# ==================================================================
+
 # ===================== 环境变量覆盖（NAS/Docker部署用；不设则用上面的默认值） =====================
 def _format_now():
     """返回当前时间戳字符串：MM-DD HH:MM，给AI看用"""
@@ -285,6 +589,7 @@ LINK_DOWNLOAD_COOLDOWN = 10      # 同一会话链接下载冷却（秒）
 
 def web_search(query: str, num_results: int = 3) -> str:
     """用博查AI联网搜索，返回搜索结果摘要"""
+    _increment_stat("websearch_calls")
     try:
         url = "https://api.bochaai.com/v1/web-search"
         headers = {
@@ -807,6 +1112,19 @@ def _ambient_take_text(chat_id) -> str:
             "不要专门回应或复述它们，也不要因此改变你的回复对象，注意每条前面的时间）】\n" + body)
 
 
+def _ambient_peek(chat_id, limit: int = 5) -> list:
+    """只看旁听缓存不删除，返回最近N条的文本列表（用于自由聊天判断）"""
+    lst = _ambient_msgs.get(chat_id, [])
+    if not lst:
+        return []
+    import datetime
+    lines = []
+    for x in lst[-limit:]:
+        _t = datetime.datetime.fromtimestamp(x.get("ts", time.time())).strftime("%H:%M")
+        lines.append(f"[{_t}] {x['text']}")
+    return lines
+
+
 def download_image_as_data_url(image_url):
     """下载图片转data_url（base64内联），返回(data_url, None)或(None, error)。"""
     import base64
@@ -1082,6 +1400,7 @@ def split_reply_to_parts(text: str) -> list:
 
 def _volc_tts_synthesize(text: str, output_path: str) -> bool:
     """新版火山引擎大模型TTS合成mp3到本地文件。返回True=成功，False=失败。"""
+    _increment_stat("volcengine_calls")
     import requests, uuid, base64, json
     try:
         url = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
@@ -1242,6 +1561,7 @@ DOUYIN_API_KEY = ""           # 解析服务API Key（需 media:read + media:wri
 DOUYIN_POLL_INTERVAL = 3      # 轮询任务状态间隔（秒）
 DOUYIN_JOB_TIMEOUT = 300      # 单任务最长等待（秒）
 DOUYIN_MEDIA_DIR = ""         # 可选：解析服务的 media-data 卷挂到本容器后的路径（填了直接读文件，省一次HTTP）
+MEDIA_MAX_MB = 200            # 单个抖音文件下载上限（MB），防止异常链接写满磁盘
 
 
 def _find_7z():
@@ -1509,6 +1829,38 @@ def docker_clear_container_data():
         print(f"⚠️ 启动时清理临时文件失败（可忽略）：{e}")
 
 
+def _mp4_moov_at_front(file_path: str):
+    """检测mp4/mov的moov atom是否在mdat之前（即faststart，可流式播放）。
+    返回True=moov在前（无需repack），False=moov在后（需要faststart），None=无法判断。"""
+    try:
+        with open(file_path, "rb") as f:
+            offset = 0
+            for _ in range(20):  # 扫描顶层box
+                f.seek(offset)
+                header = f.read(8)
+                if len(header) < 8:
+                    break
+                size = int.from_bytes(header[0:4], "big")
+                box_type = header[4:8]
+                header_len = 8
+                if size == 1:  # 64位 largesize
+                    ls = f.read(8)
+                    if len(ls) < 8:
+                        break
+                    size = int.from_bytes(ls, "big")
+                    header_len = 16
+                if box_type == b"moov":
+                    return True
+                if box_type == b"mdat":
+                    return False
+                if size < header_len:
+                    break
+                offset += size
+    except Exception:
+        return None
+    return None
+
+
 def _repack_video_with_ffmpeg(file_path: str) -> Optional[str]:
     """用ffmpeg重新封装视频文件（-c copy不转码，只修复容器格式和文件头，速度快）。
     解决v2下载的1080p视频文件头/元数据异常导致NTQQ报rich media transfer failed的问题。
@@ -1516,12 +1868,17 @@ def _repack_video_with_ffmpeg(file_path: str) -> Optional[str]:
     _ext = os.path.splitext(file_path)[1].lower()
     if _ext not in {".mp4", ".mov", ".m4v"}:
         return None
+    # 先检测moov是否已在文件头（faststart），是则无需重新封装，直接返回（省掉整盘重写的时间）
+    if _mp4_moov_at_front(file_path):
+        print("🎬 视频moov已在文件头（faststart），跳过重新封装")
+        return file_path
     try:
         import shutil
         tmp_path = file_path + ".repack.mp4"
         # -c copy: 不转码直接复制流；-movflags +faststart: moov atom移到文件头，利于NTQQ解析
-        cmd = ["ffmpeg", "-y", "-i", file_path, "-c", "copy", "-movflags", "+faststart", tmp_path]
-        result = _run_subprocess(cmd, timeout=120)
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", file_path,
+               "-c", "copy", "-movflags", "+faststart", tmp_path]
+        result = _run_subprocess(cmd, timeout=90)
         if result.returncode == 0 and os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 1024:
             print(f"🎬 ffmpeg重新封装完成（原{os.path.getsize(file_path)}字节 → 新{os.path.getsize(tmp_path)}字节）")
             shutil.move(tmp_path, file_path)
@@ -1537,6 +1894,12 @@ def _repack_video_with_ffmpeg(file_path: str) -> Optional[str]:
         return None
     except Exception as e:
         print(f"⚠️ ffmpeg重新封装异常：{e}")
+        # 关键：异常/超时也要清理半成品临时文件，否则会残留一个和原片等大的.repack.mp4撑爆磁盘
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
         return None
 
 
@@ -1955,7 +2318,7 @@ _DOUYIN_URL_RE = re.compile(
     r'(?:'
     r'v\.douyin\.com/[A-Za-z0-9_-]+/?'
     r'|'
-    r'(?!qishui\.)[a-zA-Z0-9_\-\.]*douyin\.com/[A-Za-z0-9/._?=&%:\-]+'
+    r'(?:www\.|m\.|v\.)?(?:ies)?douyin\.com/[A-Za-z0-9/._?=&%:\-]+'
     r')'
 )
 _DOUYIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -2007,6 +2370,8 @@ async def handle_douyin_download(websocket, chat_id, is_group, raw_link):
                 await notify(f"❌ 抖音提交失败：{started['err']}")
                 return
             download_id = started["download_id"]
+            # 安全：任务ID来自外部服务，只用于文件路径时先清洗（防目录穿越）；调用API仍用原ID
+            safe_id = re.sub(r'[^A-Za-z0-9_-]', '', str(download_id))[:64] or "dy"
             print(f"🎬 解析任务已创建：{download_id}（state={started.get('state')}）")
 
             # 2) 等解析容器把文件下好
@@ -2033,10 +2398,10 @@ async def handle_douyin_download(websocket, chat_id, is_group, raw_link):
                 names = [pick["video"]] if pick["video"] else list(pick["images"])
                 for name in names:
                     base_name = os.path.basename(str(name))
-                    dest = os.path.join(dy_dir, f"{download_id}_{base_name}")
+                    dest = os.path.join(dy_dir, f"{base_name}")
                     r = douyin_dtk.fetch_file(
                         DOUYIN_API_BASE, DOUYIN_API_KEY, download_id, str(name), dest,
-                        media_dir=DOUYIN_MEDIA_DIR, directory=directory)
+                        media_dir=DOUYIN_MEDIA_DIR, directory=directory, max_mb=MEDIA_MAX_MB)
                     if r.get("err"):
                         print(f"⚠️ 取回 {name} 失败：{r['err']}")
                     else:
@@ -2051,7 +2416,8 @@ async def handle_douyin_download(websocket, chat_id, is_group, raw_link):
             # 4) 组装并上传：视频直接发；多图打包成 zip
             send_path = local_files[0]
             if not pick["video"] and len(local_files) > 1:
-                send_path = await asyncio.to_thread(_zip_images_for_upload, local_files, dy_dir, download_id)
+                dy_title = result.get("title") or "抖音图文"
+                send_path = await asyncio.to_thread(_zip_images_for_upload, local_files, dy_dir, safe_id, dy_title)
 
             upload_name = re.sub(r'[#\\/:*?"<>|]', "", os.path.basename(send_path)).strip()
             upload_name = re.sub(r'\s+', " ", upload_name)
@@ -2084,25 +2450,32 @@ async def handle_douyin_download(websocket, chat_id, is_group, raw_link):
     await worker()
 
 
-def _zip_images_for_upload(paths, out_dir, tag):
+def _zip_images_for_upload(paths, out_dir, tag, title="抖音图文"):
     """把解析服务下好的多张图片打包成zip（尽量转png提高兼容性，失败保留原格式）"""
     import zipfile, shutil
     tmp = os.path.join(out_dir, f"_tmp_{tag}")
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp, exist_ok=True)
-    zip_path = os.path.join(out_dir, f"抖音图文_{tag}.zip")
+    # 用作品标题作为zip名
+    base_name = re.sub(r'[#\\/:*?"<>|]', "", str(title)).strip()
+    base_name = re.sub(r'\s+', " ", base_name)
+    if not base_name:
+        base_name = "抖音图文"
+    zip_path = os.path.join(out_dir, f"{base_name}.zip")
     try:
-        for i, p in enumerate(paths, 1):
+        for p in paths:
+            orig_name = os.path.basename(p)
+            name_no_ext = os.path.splitext(orig_name)[0]
             ext = os.path.splitext(p)[1] or ".jpg"
             try:
                 from PIL import Image
                 im = Image.open(p)
                 im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") else im.convert("RGB")
-                im.save(os.path.join(tmp, f"{i:02d}.png"), "PNG")
+                im.save(os.path.join(tmp, f"{name_no_ext}.png"), "PNG")
                 im.close()
             except Exception:
                 try:
-                    shutil.copy2(p, os.path.join(tmp, f"{i:02d}{ext}"))
+                    shutil.copy2(p, os.path.join(tmp, orig_name))
                 except Exception:
                     pass
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -2629,7 +3002,7 @@ async def send_emoji_image(websocket, chat_id: int, is_group: bool, emoji_name: 
 
 
 def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list = None,
-                  is_group: bool = False, obj_id: int = 0):
+                  is_group: bool = False, obj_id: int = 0, cq_msg: str = "", raw_msg: str = ""):
     """调用DeepSeek API，AI自动判断是否需要联网搜索/发表情（function calling）。
     pending_emojis: 传入一个list，AI选中的表情包名会append进去，由主循环负责发图。
     is_group/obj_id：群聊=True+群号，私聊=False+QQ号；用于群/私聊记忆场景隔离。"""
@@ -2640,7 +3013,11 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
     # 场景化记忆key：群聊=g{群号}_{QQ}，私聊=p{QQ}——私聊记的事不串到群里
     member_key = f"g{obj_id}_{user_id}" if is_group else f"p{user_id}"
     # 系统提示词放在最前面（追加永久记忆块：当前发言人档案+全局备忘；私聊加私密层）
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + REPLY_STYLE_PROMPT + _build_memory_block(member_key, is_private=not is_group)}]
+    # 相关人员信息块（发言人+被@的人，只注入这些人，不浪费上下文）
+    _cq = cq_msg or _current_cq_msg
+    _raw = raw_msg or _current_raw_msg
+    _related_block = _build_related_members_block(obj_id, user_id, _cq, _raw) if is_group else ""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + REPLY_STYLE_PROMPT + _build_memory_block(member_key, is_private=not is_group) + _related_block}]
     # 加上历史对话
     messages.extend(history)
     # 加上当前用户消息，前面带QQ号标识
@@ -2687,6 +3064,25 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
             }
         }
         ])
+    # 群成员查询工具（只有群聊才下发）
+    if is_group:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "query_group_member",
+                "description": "查询当前群的成员信息。当用户问「某某是谁」「某某的QQ号」「群里有没有某某」「某某是管理员吗」等关于群成员的问题时调用。可以用QQ号、昵称、群名片查询。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "要查询的成员，可以是QQ号、昵称、群名片"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        })
     if ENABLE_MEMORY:
         tools.extend(_memory_tool_defs(is_group))
     if ENABLE_EMOJI and EMOJI_MAP:
@@ -2735,6 +3131,8 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
         _runnable_names.update(("web_search", "github_search"))
     if ENABLE_MEMORY:
         _runnable_names.update(_MEMORY_TOOL_NAMES)
+    if is_group:
+        _runnable_names.add("query_group_member")
     if ENABLE_EMOJI and EMOJI_MAP:
         _runnable_names.add("send_emoji")
     runnable_calls = [
@@ -2774,6 +3172,18 @@ def call_deepseek(prompt: str, history: list, user_id: int, pending_emojis: list
                 print(f"😀 AI选择表情包：{_emo_name}")
                 messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
                                  "content": "表情包已选定，会随你的文字回复一起发出，请正常给出文字回复，不要在文字里描述该图片。"})
+                continue
+
+            # 群成员查询工具
+            if _tool_name == "query_group_member":
+                try:
+                    _q = json.loads(tool_call["function"]["arguments"]).get("query", "")
+                except Exception:
+                    _q = ""
+                _result = _query_group_member(obj_id, _q)
+                print(f"👥 AI查询群成员：{_q}")
+                messages.append({"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                                 "content": _result})
                 continue
 
             try:
@@ -2888,7 +3298,8 @@ def get_pricing_period():
 
 
 def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_urls: list,
-                         pending_emojis: list = None, is_group: bool = False, obj_id: int = 0):
+                         pending_emojis: list = None, is_group: bool = False, obj_id: int = 0,
+                         cq_msg: str = "", raw_msg: str = ""):
     """调用DeepSeek视觉模型：文字+多张base64图片一次性投给AI，并支持博查联网搜索（function calling）。
     图片不逐张串行识别，多张图在一个请求里投完，需要搜索时由视觉模型自己发起。
     pending_emojis: 传入list，AI选中的表情包名append进去，由主循环发图。
@@ -2963,6 +3374,7 @@ def call_deepseek_vision(prompt: str, history: list, user_id: int, image_data_ur
     # 第一次调用：视觉模型看图 + 判断是否需要搜索（网络异常兜底，避免打断整条连接）
     try:
         res_json = _post_json("https://api.deepseek.com/v1/chat/completions", headers, data, 90, "视觉模型")
+        _increment_stat("vision_calls")
     except Exception as e:
         print(f"❌ {e}")
         return "（图片我看到了，但我这边网络卡了一下，稍后再试？）"
@@ -3243,6 +3655,11 @@ async def _do_ai_reply(ws, chat_id, user_id, is_group, user_text, display_text, 
         await asyncio.sleep(0.8)  # 与文字回复稍微错开，更像真人
         await send_emoji_image(ws, chat_id, is_group, _emo)
 
+    # 对话延续：刚回复完一轮，下一条群消息100%触发自由聊天判断（仅群聊回复后生效，私聊不影响群聊）
+    if is_group:
+        global _random_follow_up
+        _random_follow_up = True
+
 
 async def _merge_worker(ws, chat_id, is_group):
     """消息合并防抖worker：每会话一个。
@@ -3354,6 +3771,19 @@ async def main():
             print("📢 已发送上线通知")
         else:
             print("上线通知已关闭")
+
+        # 群成员缓存：加载本地→延迟拉取→每小时刷新
+        _load_group_members()
+        async def _delayed_fetch_members():
+            await asyncio.sleep(5)  # 等WS稳定后再拉
+            try:
+                await _fetch_all_group_members(ws)
+            except Exception as e:
+                print(f"⚠️ 启动时拉取群成员失败（可忽略）：{e}")
+        asyncio.create_task(_delayed_fetch_members())
+        asyncio.create_task(_group_members_refresh_loop(ws))
+        print("👥 群成员自动获取已开启（启动拉取+每小时刷新）")
+        print(f"💬 自由聊天：开关={'开' if ENABLE_RANDOM_CHAT else '关'}，触发概率={CHAT_TRIGGER_PROBABILITY:.0%}")
 
         # 启动清理：只删自己遗留的待传临时文件（只跑一次，重连不重复）
         if delivery_mode() != "native":
@@ -3596,6 +4026,11 @@ async def main():
                 else:
                     at_flag = True    # 私聊一律视为在跟它说话
 
+                # 设置当前消息全局变量（用于相关人员注入）
+                global _current_cq_msg, _current_raw_msg
+                _current_cq_msg = cq_msg
+                _current_raw_msg = raw_msg
+
                 # 下载图片转base64并加入该用户缓存（每张60秒过期，每人最多10张）
                 if image_urls:
                     print(f"🖼️  检测到{len(image_urls)}张图片，下载并缓存...")
@@ -3655,12 +4090,27 @@ async def main():
                 # 群消息：没@就只记旁听缓存；@了才取正文继续回复。私聊不需要@
                 if is_group:
                     if not at_flag:
-                        # 没@机器人：记进旁听缓存（最多10条/每条100字，满了丢最旧），等被@时一起当上下文
+                        # 没@机器人：先记进旁听缓存
                         if user_id != self_id:
                             _amb_text = extract_user_text(cq_msg, self_id, raw_msg)
                             if _amb_text:
                                 _ambient_add(chat_id, user_id, _amb_text)
-                        continue
+                        # 自由聊天：按概率触发AI判断要不要接话
+                        _random_triggered = False
+                        if ENABLE_RANDOM_CHAT and user_id != self_id and _amb_text:
+                            global _random_follow_up
+                            # 刚回复完一轮→下一条100%触发；否则按配置概率（默认15%）
+                            _trigger = _random_follow_up or (random.random() < CHAT_TRIGGER_PROBABILITY)
+                            if _trigger:
+                                _should = await _should_reply_random(ws, chat_id, user_id, _amb_text)
+                                if _should:
+                                    _random_triggered = True
+                                    user_text = _amb_text
+                                # 判断完重置延续标记（不管接不接话，下一条恢复正常概率）
+                                _random_follow_up = False
+                            # 判断不回复就静默（不清理缓存，跟没发生一样）
+                        if not _random_triggered:
+                            continue
                     # 提取去掉@后的纯文字
                     user_text = extract_user_text(cq_msg, self_id, raw_msg)
                 else:
@@ -3668,6 +4118,9 @@ async def main():
                     user_text = raw_msg.strip()
                     if not user_text:
                         user_text = extract_user_text(cq_msg, self_id)
+                    # 私聊屏蔽纯[无文字]标签（napcat对空消息/纯图片返回的占位符），但"xxx[无文字]"这种含其他内容的不屏蔽
+                    if not is_group and user_text.strip() in ("[无文字]", "无文字"):
+                        continue
 
                 # 控制器指令过滤：只有控制器白名单用户发的指令AI才跳过，非白名单正常回复（避免其他人发"重启服务"没人理）
                 if (CONTROLLER_ALLOWED_USERS and user_id in CONTROLLER_ALLOWED_USERS
@@ -3872,14 +4325,14 @@ def _load_config_file():
     global MAX_CONTEXT_LEN, COOLDOWN, ALLOWED_GROUPS, ALLOWED_USERS
     global ENABLE_WEB_SEARCH, ENABLE_NOTIFY, SEARCH_RESULT_NUM, SYSTEM_PROMPT
     global DOWNLOAD_ROOT, _CONVERT_DIR, IMG_SUFFIX, ZIP_PASSWORD, MAX_SEND_MB, DEFAULT_CHAPTER
-    global ENABLE_DOUYIN_API, DOUYIN_API_BASE, DOUYIN_API_KEY, DOUYIN_POLL_INTERVAL, DOUYIN_JOB_TIMEOUT, DOUYIN_MEDIA_DIR
+    global ENABLE_DOUYIN_API, DOUYIN_API_BASE, DOUYIN_API_KEY, DOUYIN_POLL_INTERVAL, DOUYIN_JOB_TIMEOUT, DOUYIN_MEDIA_DIR, MEDIA_MAX_MB
     global SEND_FILE_AS_CHAT_MSG, UPLOAD_CLEANUP, UPLOAD_CLEANUP_DELAY_SECONDS
     global NAPCAT_CONTAINER, NAPCAT_DATA_DIR, NAPCAT_HOST_DIR, NAPCAT_VIEW_DIR
     global CONTROLLER_ALLOWED_USERS
     global ENABLE_THINKING_CHAT, ENABLE_THINKING_VISION, REASONING_EFFORT
     global ENABLE_DOWNLOAD, ENABLE_SEND_DELAY, SEND_DELAY_MIN, SEND_DELAY_MAX
     global ENABLE_SPLIT_REPLY, SPLIT_DELAY_MIN, SPLIT_DELAY_MAX, SPLIT_MAX_PARTS, SPLIT_PART_MAX_LEN
-    global USE_CHAT_MODEL_FOR_VISION
+    global USE_CHAT_MODEL_FOR_VISION, ENABLE_RANDOM_CHAT, CHAT_TRIGGER_PROBABILITY
     global PEAK_PERIOD_NAME, OFFPEAK_PERIOD_NAME
     global ENABLE_MEMORY, MEMORY_CONTEXT_TURNS, MEMORY_FILE, memory_store
     global MEMORY_INJECT_PROMPT
@@ -3931,6 +4384,11 @@ def _load_config_file():
     if SPLIT_PART_MAX_LEN < 20: SPLIT_PART_MAX_LEN = 20
     # true=图片识别用语言模型（V4.1原生多模态），false=用单独的视觉模型（原逻辑）
     USE_CHAT_MODEL_FOR_VISION = b("use_chat_model_for_vision", USE_CHAT_MODEL_FOR_VISION)
+    # 群聊自由聊天
+    ENABLE_RANDOM_CHAT = b("enable_random_chat", ENABLE_RANDOM_CHAT)
+    CHAT_TRIGGER_PROBABILITY = f("chat_trigger_probability", CHAT_TRIGGER_PROBABILITY)
+    if CHAT_TRIGGER_PROBABILITY < 0: CHAT_TRIGGER_PROBABILITY = 0
+    if CHAT_TRIGGER_PROBABILITY > 1: CHAT_TRIGGER_PROBABILITY = 1
     # 峰谷时段自定义显示名（如高峰="梁文峰"、空闲="梁文谷"；留空则用默认"高峰"/"空闲"）
     _peak_name = s("peak_period_name", PEAK_PERIOD_NAME)
     _offpeak_name = s("offpeak_period_name", OFFPEAK_PERIOD_NAME)
@@ -4027,6 +4485,7 @@ def _load_config_file():
     DOUYIN_POLL_INTERVAL = f("douyin_poll_interval", DOUYIN_POLL_INTERVAL)
     DOUYIN_JOB_TIMEOUT = i("douyin_job_timeout", DOUYIN_JOB_TIMEOUT)
     DOUYIN_MEDIA_DIR = os.environ.get("QQ2_DOUYIN_MEDIA_DIR") or s("douyin_media_dir", DOUYIN_MEDIA_DIR)
+    MEDIA_MAX_MB = i("media_max_mb", MEDIA_MAX_MB)
     SEND_FILE_AS_CHAT_MSG = b("send_file_as_chat_msg", SEND_FILE_AS_CHAT_MSG)
     UPLOAD_CLEANUP = b("upload_cleanup", UPLOAD_CLEANUP)
     UPLOAD_CLEANUP_DELAY_SECONDS = i("upload_cleanup_delay_seconds", UPLOAD_CLEANUP_DELAY_SECONDS)
@@ -4088,5 +4547,6 @@ if __name__ == "__main__":
         except:
             pass
         sys.stdout.write("日志已保存：QQKZT.txt（控制台）、QQLT.txt（聊天记录）\n")
+
 
 

@@ -1,0 +1,1550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LunaBot 控制台</title>
+  
+  
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/farvist@1/dist/farvist.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    .dash { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .sidebar { position: sticky; top: 0; align-self: start; height: 100vh; padding: 1.25rem 1rem; display: flex; flex-direction: column; gap: .35rem; }
+    .sidebar .nav-link { display: flex; align-items: center; gap: .65rem; }
+    .sidebar .nav-link { transition: text-indent 0.2s ease, background 0.2s ease; }
+    .sidebar .nav-link.active { text-indent: 6px; }
+    /* 侧边栏选中/悬停对比 */
+    .sidebar .nav-link {
+      background: transparent !important;
+      color: #94a3b8 !important;
+    }
+    .sidebar .nav-link:hover {
+      background: rgba(255,255,255,0.05) !important;
+      color: #cbd5e1 !important;
+    }
+    .sidebar .nav-link.active {
+      background: rgba(255,255,255,0.13) !important;
+      color: #ffffff !important;
+      font-weight: 600 !important;
+    }
+    .content { padding: 1.5rem clamp(1rem, 3vw, 2.5rem) 3rem; min-width: 0; }
+    .stat-value { font-size: 2rem; font-weight: 800; letter-spacing: -.02em; }
+    .stat-value-big { font-size: 2.5rem; font-weight: 800; letter-spacing: -.02em; }
+    .icon-tile { display: inline-flex; align-items: center; justify-content: center; width: 2.75rem; height: 2.75rem; border-radius: .75rem; font-weight: 700; font-size: .85rem; }
+    .chart-container { width: 100%; height: 360px; }
+    .demo-banner { position: sticky; top: 0; z-index: 100; padding: .5rem 1rem; background: linear-gradient(90deg, rgba(255,193,7,.15), rgba(255,152,0,.1)); border-bottom: 1px solid rgba(255,193,7,.3); text-align: center; font-size: .875rem; }
+    .demo-banner .tag { display: inline-block; padding: .15rem .5rem; background: rgba(255,193,7,.2); border-radius: .4rem; margin-right: .5rem; font-weight: 600; }
+    @media (max-width: 820px) { .dash { grid-template-columns: 1fr; } .sidebar { display: none; } }
+    /* 去掉farvist按钮左侧装饰条 */
+    .btn-gradient-primary::before, .btn-gradient-primary::after { display: none !important; }
+    .btn-gradient-primary { border-left: none !important; box-shadow: none !important; }
+    .page-content { position: relative; }
+    .page-content.slide-up-out { animation: slideUpOut 0.25s ease-in forwards; }
+    .page-content.slide-up-in { animation: slideUpIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+    @keyframes slideUpOut {
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(-24px); }
+    }
+    @keyframes slideUpIn {
+      from { opacity: 0; transform: translateY(24px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+      /* 下拉菜单深色主题 */
+    select.form-control {
+      background-color: rgba(255,255,255,0.06) !important;
+      color: #e2e8f0 !important;
+      border: 1px solid rgba(255,255,255,0.12) !important;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") !important;
+      background-repeat: no-repeat !important;
+      background-position: right 0.75rem center !important;
+      padding-right: 2rem !important;
+    }
+    select.form-control option {
+      background-color: rgba(30, 27, 75, 0.85) !important;
+      color: #e2e8f0 !important;
+      padding: 0.5rem 0.75rem;
+    }
+    select.form-control option:hover,
+    select.form-control option:checked {
+      background-color: rgba(167, 139, 250, 0.25) !important;
+      color: #fff !important;
+    }
+    /* 自定义下拉组件 - 毛玻璃卡片风格 */
+    .custom-select { position: relative; width: 100%; z-index: 50; }
+    .custom-select-trigger {
+      background: rgba(255,255,255,0.06) !important;
+      border: 1px solid rgba(255,255,255,0.12) !important;
+      border-radius: 0.6rem !important;
+      padding: 0.6rem 0.9rem !important; text-align: left !important; margin-bottom: 0.2rem !important;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #e2e8f0 !important;
+      transition: all 0.2s;
+      list-style: none !important;
+    }
+    .custom-select-trigger:hover {
+      border-color: rgba(167,139,250,0.5) !important;
+      background: rgba(255,255,255,0.09) !important;
+    }
+    .custom-select-trigger.active {
+      border-color: #a78bfa !important;
+      box-shadow: 0 0 0 3px rgba(167,139,250,0.15) !important;
+    }
+    .custom-select-arrow {
+      color: #94a3b8 !important;
+      font-size: 0.7rem;
+      transition: transform 0.2s;
+    }
+    .custom-select-trigger.active .custom-select-arrow {
+      transform: rotate(180deg);
+    }
+    .custom-select-dropdown {
+      position: absolute !important;
+      top: calc(100% + 6px) !important;
+      left: 0 !important;
+      right: 0 !important;
+      background: linear-gradient(135deg, #1e1e2e, #252535) !important;
+      backdrop-filter: blur(20px) !important;
+      -webkit-backdrop-filter: blur(20px) !important;
+      border: 1px solid rgba(255,255,255,0.25) !important;
+      border-radius: 0.75rem !important;
+      overflow: hidden !important;
+      display: none !important;
+      z-index: 999 !important;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4) !important;
+      list-style: none !important;
+      padding: 0.3rem !important;
+    }
+    .custom-select-dropdown.show {
+      display: block !important;
+      animation: dropdownIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    @keyframes dropdownIn {
+      from {
+        opacity: 0;
+        transform: translateY(-12px) scale(0.94);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+    .custom-select-dropdown.hiding {
+      animation: dropdownOut 0.25s ease-in forwards !important;
+    }
+    @keyframes dropdownOut {
+      from {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+      to {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.96);
+      }
+    }
+    .custom-select-option {
+      padding: 0.6rem 0.9rem !important; text-align: left !important; margin-bottom: 0.2rem !important;
+      color: #cbd5e1 !important;
+      cursor: pointer;
+      transition: all 0.15s;
+      border-radius: 0.4rem !important;
+      list-style: none !important;
+      background: transparent !important;
+      text-overflow: clip !important;
+      overflow: visible !important;
+      white-space: nowrap !important; overflow: visible !important; text-overflow: clip !important;
+    }
+    .custom-select-option:hover {
+      background: rgba(255,255,255,0.1) !important;
+      color: #ffffff !important;
+    }
+    .custom-select-option.selected {
+      background: #7c3aed !important;
+      color: #ffffff !important;
+    }
+    .custom-select-option:last-child { margin-bottom: 0 !important; }
+
+        /* 模型管理页 - 保存按钮：保持固定宽度，但不再压制动画（动画改由状态类驱动） */
+        #page-models button[onclick='saveModel()'] {
+      opacity: 1 !important;
+      width: 180px !important; white-space: nowrap !important;
+      position: relative;
+    }
+    /* 悬停/按下不再有额外的位移或滤镜，避免和状态动画打架 */
+    #page-models button[onclick='saveModel()']:active,
+    #page-models button[onclick='saveModel()']:hover,
+    #page-models button[onclick='saveModel()']:disabled {
+      opacity: 1 !important;
+      filter: none !important;
+    }
+    #page-models button[onclick='saveModel()']:hover::before,
+    #page-models button[onclick='saveModel()']:hover::after {
+      display: none !important;
+    }
+
+    /* ============ 所有保存按钮通用反馈：按下弹起 / 转圈 / 成功脉冲 / 失败抖动 ============ */
+    @keyframes btnPressPop {
+      0%   { transform: scale(1); }
+      35%  { transform: scale(0.93); }
+      70%  { transform: scale(1.02); }
+      100% { transform: scale(1); }
+    }
+    @keyframes btnSpin { to { transform: rotate(360deg); } }
+    @keyframes btnPulse {
+      0%   { box-shadow: 0 0 0 0 rgba(90, 160, 255, 0.55); }
+      70%  { box-shadow: 0 0 0 12px rgba(90, 160, 255, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(90, 160, 255, 0); }
+    }
+    @keyframes btnShake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-6px); }
+      40% { transform: translateX(6px); }
+      60% { transform: translateX(-4px); }
+      80% { transform: translateX(4px); }
+    }
+    .btn-press { animation: btnPressPop 0.3s cubic-bezier(0.2, 0.7, 0.3, 1.15) 1 !important; }
+    .btn-spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      margin-right: 8px;
+      vertical-align: -2px;
+      border: 2px solid rgba(255, 255, 255, 0.45);
+      border-top-color: #ffffff;
+      border-radius: 50%;
+      animation: btnSpin 0.7s linear infinite;
+    }
+    .btn-spinner[hidden] { display: none; }
+    .btn-saving { cursor: progress !important; opacity: 0.9 !important; }
+    .btn-saved  { animation: btnPulse 0.9s ease-out 2 !important; }
+    .btn-error  { animation: btnShake 0.45s ease-in-out 1 !important; }
+    /* 模型页按钮原有规则优先级更高，这里用"同选择器+状态类"再兜一层，确保动画不被压掉 */
+    #page-models button[onclick='saveModel()'].btn-press { animation: btnPressPop 0.3s cubic-bezier(0.2, 0.7, 0.3, 1.15) 1 !important; }
+    #page-models button[onclick='saveModel()'].btn-saved { animation: btnPulse 0.9s ease-out 2 !important; }
+    #page-models button[onclick='saveModel()'].btn-error { animation: btnShake 0.45s ease-in-out 1 !important; }
+
+/* 模型管理页面 - 美化开关和单选按钮 */
+    .model-switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      display: inline-block;
+    }
+    .model-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .model-switch-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #374151;
+      border-radius: 24px;
+      transition: 0.3s;
+    }
+    .model-switch-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background: white;
+      border-radius: 50%;
+      transition: 0.3s;
+    }
+    .model-switch input:checked + .model-switch-slider {
+      background: #7c3aed;
+    }
+    .model-switch input:checked + .model-switch-slider:before {
+      transform: translateX(20px);
+    }
+    .model-radio {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      padding: 6px 14px;
+      border-radius: 0.5rem;
+      border: 1px solid rgba(255,255,255,0.15);
+      background: #1e1e2e;
+      color: #94a3b8;
+      transition: all 0.2s;
+      user-select: none;
+    }
+    .model-radio:hover {
+      border-color: rgba(167,139,250,0.5);
+      color: #e2e8f0;
+    }
+    .model-radio input {
+      display: none;
+    }
+    .model-radio:has(input:checked) {
+      background: #7c3aed;
+      border-color: #7c3aed;
+      color: white;
+      font-weight: 600;
+    }
+
+    /* 自定义下拉组件 */
+    .custom-select { position: relative; width: 100%; }
+    .custom-select-trigger {
+      width: 100%;
+      background: #1e1e2e;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 0.5rem;
+      padding: 0.55rem 0.85rem;
+      color: #e2e8f0;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.95rem;
+      box-sizing: border-box;
+    }
+    .custom-select-trigger:hover { border-color: rgba(167,139,250,0.5); }
+    .custom-select-trigger.active { border-color: #a78bfa; box-shadow: 0 0 0 3px rgba(167,139,250,0.15); }
+    .custom-select-arrow { color: #94a3b8; font-size: 0.7rem; transition: transform 0.2s; }
+    .custom-select-trigger.active .custom-select-arrow { transform: rotate(180deg); }
+    .custom-select-dropdown {
+      position: fixed;
+      z-index: 99999 !important;
+      margin-top: 4px;
+      background: #252535 !important;
+      border: 1px solid rgba(255,255,255,0.25) !important;
+      border-radius: 0.6rem;
+      padding: 0.4rem;
+      display: none;
+      z-index: 999 !important;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .custom-select-dropdown.show {
+      display: block;
+      animation: dropdownIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .custom-select-dropdown.hiding {
+      display: block;
+      animation: dropdownOut 0.25s ease-in forwards;
+    }
+    @keyframes dropdownIn {
+      from { opacity: 0; transform: translateY(-12px) scale(0.94); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes dropdownOut {
+      from { opacity: 1; transform: translateY(0) scale(1); }
+      to { opacity: 0; transform: translateY(-12px) scale(0.94); }
+    }
+    .custom-select-option {
+      padding: 0.5rem 0.75rem;
+      color: #cbd5e1;
+      cursor: pointer;
+      border-radius: 0.4rem;
+      font-size: 0.95rem;
+    }
+    .custom-select-option:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
+    .custom-select-option.selected { background: #7c3aed; color: #fff; font-weight: 700; }
+    .custom-select-option:last-child { margin-bottom: 0 !important; }
+
+    select.form-control:focus {
+      border-color: #a78bfa !important;
+      box-shadow: 0 0 0 3px rgba(167,139,250,0.15) !important;
+    }
+</style>
+</head>
+<body>
+
+  <div class="dash">
+    <aside class="sidebar glass-strong">
+      <a class="navbar-brand mb-5" href="#" style="margin-left:2.75rem;margin-top:0.5rem;"><span class="text-gradient">LunaBot</span></a>
+      <a class="nav-link active" href="#" data-page="dashboard" draggable="false" ondragstart="event.preventDefault();return false;">仪表盘</a>
+      <a class="nav-link" href="#" data-page="models" draggable="false" ondragstart="event.preventDefault();return false;">模型管理</a>
+      <a class="nav-link" href="#" data-page="prompt" draggable="false" ondragstart="event.preventDefault();return false;">系统提示词</a>
+      <a class="nav-link" href="#" data-page="connection" draggable="false" ondragstart="event.preventDefault();return false;">连接设置</a>
+      <a class="nav-link" href="#" data-page="download" draggable="false" ondragstart="event.preventDefault();return false;">下载设置</a>
+      <a class="nav-link" href="#" data-page="features" draggable="false" ondragstart="event.preventDefault();return false;">功能设置</a>
+      <a class="nav-link" href="#" data-page="whitelist" draggable="false" ondragstart="event.preventDefault();return false;">白名单</a>
+      <a class="nav-link" href="#" data-page="logs" draggable="false" ondragstart="event.preventDefault();return false;">实时日志</a>
+      <a class="nav-link" href="#" data-page="webui" draggable="false" ondragstart="event.preventDefault();return false;">WebUI设置</a>
+      <div class="mt-auto">
+        <button class="btn btn-gradient-primary btn-lg btn-block" onclick="applyAndRestart()" style="font-size:1.1rem; font-weight:800; font-family:Inter, sans-serif; letter-spacing:-.02em; padding:.85rem 1.25rem;">
+            应用并重启
+          </button>
+      </div>
+    </aside>
+
+    <div id="main" tabindex="-1" class="content">
+      <!-- 仪表盘页面 -->
+      <div id="page-dashboard" class="page-content">
+      <div class="d-flex align-items-center justify-content-between mb-5 flex-wrap gap-3">
+        <div>
+          <h1 class="h2 mb-1">仪表盘</h1>
+          <p class="text-muted mb-0">LunaBot 运行状态概览</p>
+        </div>
+
+      </div>
+
+      <div class="row gy-4 mb-6">
+        <div class="col-12 col-md-6">
+          <div class="card card-glow hover-lift"><div class="card-body" style="display:flex; justify-content:flex-start; align-items:center; gap:2.5rem;">
+            <div>
+              <div class="stat-value" id="apiCalls" style="font-size:2.75rem;">--</div>
+              <div class="text-muted">总API调用次数</div>
+            </div>
+            <div style="font-size:.9rem; line-height:1.9; display:grid; grid-template-columns:1fr 1fr; gap:0.3rem 1.5rem; margin-left:auto; padding-right:1rem;">
+              <div><span style="color:#a78bfa;">主模型</span>: <span id="deepseekCalls">--</span></div>
+              <div><span style="color:#f472b6;">视觉模型</span>: <span id="visionCalls">--</span></div>
+              <div><span style="color:#60a5fa;">火山引擎</span>: <span id="volcengineCalls">--</span></div>
+              <div><span style="color:#34d399;">联网搜索</span>: <span id="websearchCalls">--</span></div>
+            </div>
+          </div></div>
+        </div>
+        <div class="col-12 col-md-6">
+          <div class="card card-glow hover-lift"><div class="card-body" style="display:flex; justify-content:flex-start; align-items:center; gap:2.5rem;">
+            <div>
+              <div class="stat-value" id="balanceUsed" style="font-size:2.75rem;">--</div>
+              <div class="text-muted">剩余额度</div>
+            </div>
+            <div style="margin-left:2.5rem;">
+              <div class="stat-value" id="balanceUsedToday" style="font-size:2.75rem; color:#f87171; font-weight:800;">--</div>
+              <div class="text-muted">今日消耗</div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="card"><div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+          <h2 class="h4 mb-0">余额消耗</h2>
+
+        </div>
+        <div class="chart-container" id="balanceChart"></div>
+        <div class="text-muted text-center mt-2" id="chartTotal">合计：-- 元</div>
+      </div></div>
+      </div>
+
+      <!-- 系统提示词页面 -->
+      <div id="page-prompt" class="page-content" style="display:none;">
+        <div class="d-flex align-items-center justify-content-between mb-5 flex-wrap gap-3">
+          <div>
+            <h1 class="h2 mb-1">系统提示词</h1>
+            <p class="text-muted mb-0">编辑AI人设和说话风格，保存后需重启生效</p>
+          </div>
+          <button class="btn btn-gradient-primary btn-lg" onclick="savePrompt()" style="font-weight:700;">保存提示词</button>
+        </div>
+        <div class="card"><div class="card-body">
+          <textarea id="promptEditor" class="form-control" draggable="false" ondragstart="event.preventDefault(); event.stopPropagation(); return false;" ondrop="event.preventDefault(); return false;" style="width:100%; min-height:500px; font-family:Consolas, monospace; font-size:.9rem; line-height:1.6; resize:none; -webkit-user-drag:none; user-drag:none;" placeholder="加载中..."></textarea>
+<script>document.getElementById("promptEditor").addEventListener("dragstart", function(e){e.preventDefault();e.stopPropagation();return false;});document.getElementById("promptEditor").addEventListener("drop", function(e){e.preventDefault();return false;});</script>
+        </div></div>
+      </div>
+
+      <!-- 连接设置页面 -->
+      <div id="page-connection" class="page-content" style="display:none;">
+        <div class="d-flex align-items-center justify-content-between mb-5 flex-wrap gap-3">
+          <div>
+            <h1 class="h2 mb-1">连接设置</h1>
+            <p class="text-muted mb-0">管理NapCat、抖音解析服务、控制器的连接配置（测试版）</p>
+          </div>
+          <button class="btn btn-gradient-primary btn-lg" onclick="saveConnection()" style="font-weight:700;">保存连接设置</button>
+        </div>
+
+        <!-- NapCat连接 -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#a78bfa;">NapCat 连接</h3>
+          <div class="row gy-3">
+            <div class="col-12">
+              <label class="form-label">OneBot WebSocket 地址</label>
+              <input type="text" class="form-control" id="conn_onebot_ws" placeholder="ws://napcat:6700?access_token=xxx">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">NapCat 容器名</label>
+              <input type="text" class="form-control" id="conn_napcat_container" placeholder="qq-napcat">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">数据目录（容器内）</label>
+              <input type="text" class="form-control" id="conn_napcat_data_dir" placeholder="/app/data">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">视图目录（容器内）</label>
+              <input type="text" class="form-control" id="conn_napcat_view_dir" placeholder="/app/data">
+            </div>
+          </div>
+        </div></div>
+
+        <!-- 抖音解析服务 -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#f472b6;">抖音解析服务（DTK）</h3>
+          <div class="row gy-3">
+            <div class="col-md-6">
+              <label class="form-label">启用抖音解析API</label>
+              <div class="custom-select" id="conn_douyin_enabled_wrap">
+                <div class="custom-select-trigger" onclick="toggleCustomSelect('conn_douyin_enabled_wrap')">
+                  <span class="custom-select-value" id="conn_douyin_enabled_value">开启</span>
+                  <span class="custom-select-arrow">▾</span>
+                </div>
+                <div class="custom-select-dropdown">
+                  <div class="custom-select-option" onclick="selectCustomOption('conn_douyin_enabled_wrap', 'true', '开启')">开启</div>
+                  <div class="custom-select-option" onclick="selectCustomOption('conn_douyin_enabled_wrap', 'false', '关闭')">关闭</div>
+                </div>
+                <input type="hidden" id="conn_douyin_enabled" value="true">
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">API 地址</label>
+              <input type="text" class="form-control" id="conn_douyin_api_base" placeholder="http://dtk-api:8000">
+            </div>
+            <div class="col-12">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-control" id="conn_douyin_api_key" placeholder="dtk_xxx">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">轮询间隔（秒）</label>
+              <input type="number" class="form-control" id="conn_douyin_poll" placeholder="3" min="1">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">任务超时（秒）</label>
+              <input type="number" class="form-control" id="conn_douyin_timeout" placeholder="300" min="10">
+            </div>
+          </div>
+        </div></div>
+
+        <!-- 控制器反向WS -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#60a5fa;">控制器反向 WS</h3>
+          <div class="row gy-3">
+            <div class="col-md-4">
+              <label class="form-label">反向 WS 端口</label>
+              <input type="number" class="form-control" id="conn_ctrl_ws_port" placeholder="6701" min="1" max="65535">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">AI 容器名</label>
+              <input type="text" class="form-control" id="conn_ctrl_ai" placeholder="qq-bot">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">NapCat 容器名</label>
+              <input type="text" class="form-control" id="conn_ctrl_napcat" placeholder="qq-napcat">
+            </div>
+          </div>
+        </div></div>
+
+      </div>
+
+      <!-- 模型管理页面 -->
+      <div id="page-models" class="page-content" style="display:none;">
+        <div class="d-flex align-items-center justify-content-between mb-5 flex-wrap gap-3">
+          <div>
+            <h1 class="h2 mb-1">模型管理</h1>
+            <p class="text-muted mb-0">管理API密钥、模型选择、功能开关等配置</p>
+          </div>
+          <button class="btn btn-gradient-primary btn-lg" onclick="saveModel()" style="font-weight:700;">保存模型设置</button>
+        </div>
+
+        <!-- API密钥 -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#a78bfa;">API 密钥</h3>
+          <div class="row gy-3">
+            <div class="col-12">
+              <label class="form-label">DeepSeek API Key</label>
+              <input type="password" class="form-control" id="model_deepseek_key" placeholder="sk-xxx">
+            </div>
+            <div class="col-12">
+              <label class="form-label">博查AI 搜索 API Key</label>
+              <input type="password" class="form-control" id="model_bocha_key" placeholder="sk-xxx">
+            </div>
+            <div class="col-12">
+              <label class="form-label">火山引擎 API Key</label>
+              <input type="password" class="form-control" id="model_volc_key" placeholder="xxx-xxx-xxx">
+            </div>
+          </div>
+        </div></div>
+
+        <!-- 模型选择 -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#f472b6;">模型选择</h3>
+          <div class="row gy-3">
+            <div class="col-md-6">
+              <label class="form-label">对话模型</label>
+              <input type="text" class="form-control" id="model_chat" placeholder="deepseek-flash">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">视觉模型</label>
+              <input type="text" class="form-control" id="model_vision" placeholder="deepseek-flash">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">思考强度</label>
+              <div class="d-flex gap-2 mt-2">
+                <label class="model-radio">
+                  <input type="radio" name="model_effort" id="model_effort_low" value="low">
+                  <span>low</span>
+                </label>
+                <label class="model-radio">
+                  <input type="radio" name="model_effort" id="model_effort_medium" value="medium">
+                  <span>medium</span>
+                </label>
+                <label class="model-radio">
+                  <input type="radio" name="model_effort" id="model_effort_high" value="high">
+                  <span>high</span>
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">最大上下文轮数</label>
+              <input type="number" class="form-control" id="model_context" placeholder="8" min="1" max="50">
+            </div>
+          </div>
+        </div></div>
+
+        <!-- 功能开关 -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#60a5fa;">功能开关</h3>
+          <div class="row gy-3">
+            <div class="col-md-6">
+              <div class="d-flex align-items-center justify-content-between py-2">
+                <span>对话思考模式</span>
+                <label class="model-switch">
+                  <input type="checkbox" id="model_think_chat">
+                  <span class="model-switch-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="d-flex align-items-center justify-content-between py-2">
+                <span>视觉思考模式</span>
+                <label class="model-switch">
+                  <input type="checkbox" id="model_think_vision">
+                  <span class="model-switch-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="d-flex align-items-center justify-content-between py-2">
+                <span>视觉任务用对话模型</span>
+                <label class="model-switch">
+                  <input type="checkbox" id="model_chat_for_vision">
+                  <span class="model-switch-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="d-flex align-items-center justify-content-between py-2">
+                <span>联网搜索</span>
+                <label class="model-switch">
+                  <input type="checkbox" id="model_websearch">
+                  <span class="model-switch-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">搜索结果数量</label>
+              <input type="number" class="form-control" id="model_search_num" placeholder="3" min="1" max="10">
+            </div>
+          </div>
+        </div></div>
+
+        <!-- 语音合成 TTS -->
+        <div class="card mb-4"><div class="card-body">
+          <h3 class="h5 mb-3" style="color:#34d399;">语音合成（TTS）</h3>
+          <div class="row gy-3">
+            <div class="col-md-6">
+              <div class="d-flex align-items-center gap-3 py-2">
+                <span>启用语音回复</span>
+                <label class="model-switch">
+                  <input type="checkbox" id="model_tts_enable">
+                  <span class="model-switch-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="d-flex align-items-center gap-3 py-2">
+                <span>TTS 引擎</span>
+                <div class="d-flex gap-2">
+                  <label class="model-radio">
+                    <input type="radio" name="model_tts_engine" id="model_tts_volc" value="volc">
+                    <span>火山引擎</span>
+                  </label>
+                  <label class="model-radio">
+                    <input type="radio" name="model_tts_engine" id="model_tts_edge" value="edge">
+                    <span>Edge TTS</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">火山引擎音色 ID</label>
+              <input type="text" class="form-control" id="model_volc_voice" placeholder="ICL_uranus_zh_female_xxx_tob">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Edge TTS 音色（备用）</label>
+              <input type="text" class="form-control" id="model_edge_voice" placeholder="zh-CN-XiaoyiNeural">
+            </div>
+          </div>
+        </div></div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/farvist@1/dist/farvist.min.js" defer></script>
+  <script>
+    const API_BASE = localStorage.getItem('lunabot_api_base') || '';
+
+  // 密钥输入框：服务端不回显明文，已设置时给个占位提示（留空=保持不变，输入重置可清空）
+  function setSecretHint(id, hasValue) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.placeholder = hasValue ? '已设置（留空=不修改；输入重置可清空）' : '未设置';
+  }
+
+  // ================= 保存按钮通用反馈 =================
+  // 按下去弹起（点击瞬间的缩放回弹）
+  function btnPress(btn) {
+    if (!btn) return;
+    btn.classList.remove('btn-press');
+    void btn.offsetWidth;              // 触发重排，保证连续点击也能重新播放动画
+    btn.classList.add('btn-press');
+    setTimeout(() => btn.classList.remove('btn-press'), 320);
+  }
+
+  // 状态：saving(转圈) / saved(脉冲) / error(抖动)；传 null 清除
+  function btnState(btn, state, label) {
+    if (!btn) return;
+    btn.classList.remove('btn-saving', 'btn-saved', 'btn-error');
+    if (state) btn.classList.add('btn-' + state);
+    btn.disabled = (state === 'saving');
+    const hidden = state === 'saving' ? '' : ' hidden';
+    btn.innerHTML = '<span class="btn-spinner"' + hidden + '></span>' + (label || '');
+  }
+
+  // 恢复按钮原样
+  function btnReset(btn, originalHtml) {
+    if (!btn) return;
+    btn.classList.remove('btn-saving', 'btn-saved', 'btn-error', 'btn-press');
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+
+  // 轻量提示：替代原来页面下方那行静态提示（只在出错时出现，2.6秒自动消失）
+  function showToast(msg, type) {
+    let el = document.getElementById('uiToast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'uiToast';
+      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:26px;z-index:9999;' +
+        'padding:10px 18px;border-radius:10px;font-size:14px;color:#fff;max-width:80vw;text-align:center;' +
+        'box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .18s ease;pointer-events:none';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.background = type === 'error' ? '#c62828' : (type === 'success' ? '#1b7f4b' : '#333333');
+    el.style.opacity = '1';
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 2600);
+  }
+
+  // 统一保存流程：按下弹起 → 转圈 → 成功脉冲 / 失败抖动+提示 → 3秒复原
+  async function runSave(btn, url, payload) {
+    if (!btn || btn.disabled) return false;
+    const originalHtml = btn.innerHTML;
+    btnPress(btn);
+    await new Promise(r => setTimeout(r, 180));    // 先播完"弹起"再进保存态
+    btnState(btn, 'saving', '保存中...');
+    const started = Date.now();
+    let ok = false, errMsg = '';
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      ok = !!data.ok;
+      if (!ok) errMsg = data.error || '未知错误';
+    } catch (e) {
+      errMsg = e.message;
+    }
+    const elapsed = Date.now() - started;
+    if (elapsed < 400) await new Promise(r => setTimeout(r, 400 - elapsed));
+    if (ok) {
+      btnState(btn, 'saved', '✓ 保存成功');
+    } else {
+      btnState(btn, 'error', '✗ 保存失败');
+      showToast('保存失败：' + errMsg, 'error');
+    }
+    setTimeout(() => btnReset(btn, originalHtml), 3000);
+    return ok;
+  }
+
+    // 页面切换（上下滑动转场，根据方向改变动画）
+    let _currentPage = 'dashboard';
+    const _pageOrder = ['dashboard', 'models', 'prompt', 'connection', 'download', 'features', 'whitelist', 'logs', 'webui'];
+    function switchPage(pageName) {
+      if (_currentPage === pageName) return;
+      const current = document.getElementById('page-' + _currentPage);
+      const target = document.getElementById('page-' + pageName);
+      if (!target || !current) return;
+      const fromIdx = _pageOrder.indexOf(_currentPage);
+      const toIdx = _pageOrder.indexOf(pageName);
+      const isForward = toIdx > fromIdx; // 前进=向上淡出+从下进入，后退=向下淡出+从上进入
+      _currentPage = pageName;
+      // 更新侧边栏选中
+      document.querySelectorAll('.sidebar .nav-link').forEach(l => l.classList.remove('active'));
+      document.querySelectorAll('.sidebar .nav-link[data-page="' + pageName + '"]').forEach(l => l.classList.add('active'));
+      // 当前页面淡出（前进向上，后退向下）
+      const outY = isForward ? '-24px' : '24px';
+      current.style.transition = 'opacity 0.25s ease-in, transform 0.25s ease-in';
+      current.style.opacity = '0';
+      current.style.transform = 'translateY(' + outY + ')';
+      setTimeout(() => {
+        current.style.display = 'none';
+        current.style.opacity = '';
+        current.style.transform = '';
+        current.style.transition = '';
+        // 新页面淡入（前进从下往上，后退从上往下）
+        const inY = isForward ? '24px' : '-24px';
+        target.style.display = 'block';
+        target.style.opacity = '0';
+        target.style.transform = 'translateY(' + inY + ')';
+        target.style.transition = 'opacity 0.3s cubic-bezier(0.16,1,0.3,1), transform 0.3s cubic-bezier(0.16,1,0.3,1)';
+        void target.offsetWidth; // 强制重排
+        target.style.opacity = '1';
+        target.style.transform = 'translateY(0)';
+        if (pageName === 'prompt') loadPrompt();
+      if (pageName === 'connection') loadConnection();
+      if (pageName === 'models') loadModel();
+      }, 250);
+    }
+    document.querySelectorAll('.sidebar .nav-link[data-page]').forEach(link => {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        switchPage(this.getAttribute('data-page'));
+      });
+    });
+
+    // 系统提示词读写
+
+    async function loadPrompt() {
+      try {
+        const res = await fetch(API_BASE + '/api/config/prompt');
+        const data = await res.json();
+        document.getElementById('promptEditor').value = data.prompt || '';
+      } catch (e) {
+      showToast('加载提示词失败：' + e.message, 'error');
+      }
+    }
+    // 自定义下拉组件
+    function _closeDropdown(dropdown, trigger) {
+      if (!dropdown.classList.contains('show')) return;
+      dropdown.classList.add('hiding');
+      trigger.classList.remove('open');
+      setTimeout(() => {
+        dropdown.classList.remove('show', 'hiding');
+      }, 250);
+    }
+    function toggleCustomSelect(id) {
+      const wrap = document.getElementById(id);
+      const dropdown = wrap.querySelector('.custom-select-dropdown');
+      const trigger = wrap.querySelector('.custom-select-trigger');
+      const isOpen = dropdown.classList.contains('show');
+      // 关闭所有其他的
+      document.querySelectorAll('.custom-select-dropdown').forEach(d => {
+        if (d !== dropdown) _closeDropdown(d, d.closest('.custom-select').querySelector('.custom-select-trigger'));
+      });
+      if (isOpen) {
+        _closeDropdown(dropdown, trigger);
+      } else {
+        dropdown.classList.add('show');
+        trigger.classList.add('open');
+      }
+    }
+    function selectCustomOption(wrapId, value, text) {
+      const wrap = document.getElementById(wrapId);
+      const hiddenInput = wrap.querySelector('input[type=hidden]');
+      const valueSpan = wrap.querySelector('.custom-select-value');
+      hiddenInput.value = value;
+      valueSpan.textContent = text;
+      // 关闭
+      _closeDropdown(wrap.querySelector('.custom-select-dropdown'), wrap.querySelector('.custom-select-trigger'));
+      // 更新选中状态
+      wrap.querySelectorAll('.custom-select-option').forEach(opt => {
+        opt.classList.toggle('selected', opt.textContent === text);
+      });
+    }
+    // 点击外部关闭下拉
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.custom-select')) {
+        document.querySelectorAll('.custom-select-dropdown').forEach(d => {
+          _closeDropdown(d, d.closest('.custom-select').querySelector('.custom-select-trigger'));
+        });
+      }
+    });
+    // 滚动/缩放时重新定位打开的下拉
+    function _repositionOpenDropdowns() {
+      document.querySelectorAll('.custom-select-dropdown.show').forEach(dropdown => {
+        const wrap = dropdown.closest('.custom-select');
+        if (!wrap) return;
+        const trigger = wrap.querySelector('.custom-select-trigger');
+        if (!trigger) return;
+        const rect = trigger.getBoundingClientRect();
+        dropdown.style.top = (rect.bottom + 4) + 'px';
+        dropdown.style.left = rect.left + 'px';
+        dropdown.style.width = rect.width + 'px';
+      });
+    }
+    window.addEventListener('scroll', _repositionOpenDropdowns, true);
+    window.addEventListener('resize', _repositionOpenDropdowns);
+
+    // 连接设置读写
+    async function loadConnection() {
+      try {
+        const res = await fetch(API_BASE + '/api/config/connection');
+        const data = await res.json();
+        if (data.ok && data.config) {
+          const c = data.config;
+          document.getElementById('conn_onebot_ws').value = c.onebot_ws || '';
+          document.getElementById('conn_napcat_container').value = c.napcat_container || '';
+          document.getElementById('conn_napcat_data_dir').value = c.napcat_data_dir || '';
+          document.getElementById('conn_napcat_view_dir').value = c.napcat_view_dir || '';
+          const enabledVal = c.douyin_api_enabled ? 'true' : 'false';
+          const enabledText = c.douyin_api_enabled ? '开启' : '关闭';
+          document.getElementById('conn_douyin_enabled').value = enabledVal;
+          document.getElementById('conn_douyin_enabled_value').textContent = enabledText;
+          document.querySelectorAll('#conn_douyin_enabled_wrap .custom-select-option').forEach(opt => {
+            opt.classList.toggle('selected', opt.textContent === enabledText);
+          });
+          document.getElementById('conn_douyin_api_key').value = c.douyin_api_key || '';
+          setSecretHint('conn_douyin_api_key', c.has_douyin_api_key);
+          document.getElementById('conn_douyin_api_base').value = c.douyin_api_base || '';
+          document.getElementById('conn_douyin_poll').value = c.douyin_poll_interval || 3;
+          document.getElementById('conn_douyin_timeout').value = c.douyin_job_timeout || 300;
+          document.getElementById('conn_ctrl_ws_port').value = c.controller_ws_port || 6701;
+          document.getElementById('conn_ctrl_ai').value = c.controller_container_ai || '';
+          document.getElementById('conn_ctrl_napcat').value = c.controller_container_napcat || '';
+        }
+      } catch (e) {
+      showToast('加载连接设置失败：' + e.message, 'error');
+      }
+    }
+    async function saveConnection() {
+      const btn = document.querySelector('#page-connection button[onclick="saveConnection()"]');
+      const data = {
+        onebot_ws: document.getElementById('conn_onebot_ws').value,
+        napcat_container: document.getElementById('conn_napcat_container').value,
+        napcat_data_dir: document.getElementById('conn_napcat_data_dir').value,
+        napcat_view_dir: document.getElementById('conn_napcat_view_dir').value,
+        douyin_api_enabled: document.getElementById('conn_douyin_enabled').value === 'true',
+        douyin_api_key: document.getElementById('conn_douyin_api_key').value,
+        douyin_api_base: document.getElementById('conn_douyin_api_base').value,
+        douyin_poll_interval: parseInt(document.getElementById('conn_douyin_poll').value) || 3,
+        douyin_job_timeout: parseInt(document.getElementById('conn_douyin_timeout').value) || 300,
+        controller_ws_port: parseInt(document.getElementById('conn_ctrl_ws_port').value) || 6701,
+        controller_container_ai: document.getElementById('conn_ctrl_ai').value,
+        controller_container_napcat: document.getElementById('conn_ctrl_napcat').value,
+      };
+      await runSave(btn, API_BASE + '/api/config/connection', data);
+    }
+
+    // 模型配置读写
+    async function loadModel() {
+      try {
+        const res = await fetch(API_BASE + '/api/config/model');
+        const data = await res.json();
+        if (data.ok && data.config) {
+          const c = data.config;
+          document.getElementById('model_deepseek_key').value = c.deepseek_api_key || '';
+          setSecretHint('model_deepseek_key', c.has_deepseek_api_key);
+          document.getElementById('model_bocha_key').value = c.bocha_api_key || '';
+          setSecretHint('model_bocha_key', c.has_bocha_api_key);
+          document.getElementById('model_volc_key').value = c.volc_api_key || '';
+          setSecretHint('model_volc_key', c.has_volc_api_key);
+          document.getElementById('model_chat').value = c.deepseek_model || '';
+          document.getElementById('model_vision').value = c.deepseek_vision_model || '';
+          document.getElementById('model_context').value = c.max_context_len || 8;
+          document.getElementById('model_search_num').value = c.search_result_num || 3;
+          document.getElementById('model_volc_voice').value = c.volc_voice || '';
+          document.getElementById('model_edge_voice').value = c.tts_voice || '';
+          // 单选按钮
+          const effort = c.reasoning_effort || 'high';
+          document.getElementById('model_effort_' + effort).checked = true;
+          const ttsEngine = c.tts_engine || 'volc';
+          document.getElementById('model_tts_' + ttsEngine).checked = true;
+          // 开关
+          document.getElementById('model_think_chat').checked = !!c.enable_thinking_chat;
+          document.getElementById('model_think_vision').checked = !!c.enable_thinking_vision;
+          document.getElementById('model_chat_for_vision').checked = !!c.use_chat_model_for_vision;
+          document.getElementById('model_websearch').checked = !!c.enable_web_search;
+          document.getElementById('model_tts_enable').checked = !!c.enable_tts;
+        }
+      } catch (e) {
+      showToast('加载模型配置失败：' + e.message, 'error');
+      }
+    }
+    async function saveModel() {
+      const btn = document.querySelector('#page-models button[onclick="saveModel()"]');
+      const effortEl = document.querySelector('input[name="model_effort"]:checked');
+      const ttsEngineEl = document.querySelector('input[name="model_tts_engine"]:checked');
+      const data = {
+        deepseek_api_key: document.getElementById('model_deepseek_key').value,
+        bocha_api_key: document.getElementById('model_bocha_key').value,
+        volc_api_key: document.getElementById('model_volc_key').value,
+        deepseek_model: document.getElementById('model_chat').value,
+        deepseek_vision_model: document.getElementById('model_vision').value,
+        reasoning_effort: effortEl ? effortEl.value : 'high',
+        max_context_len: parseInt(document.getElementById('model_context').value) || 8,
+        search_result_num: parseInt(document.getElementById('model_search_num').value) || 3,
+        enable_thinking_chat: document.getElementById('model_think_chat').checked,
+        enable_thinking_vision: document.getElementById('model_think_vision').checked,
+        use_chat_model_for_vision: document.getElementById('model_chat_for_vision').checked,
+        enable_web_search: document.getElementById('model_websearch').checked,
+        enable_tts: document.getElementById('model_tts_enable').checked,
+        tts_engine: ttsEngineEl ? ttsEngineEl.value : 'volc',
+        volc_voice: document.getElementById('model_volc_voice').value,
+        tts_voice: document.getElementById('model_edge_voice').value,
+      };
+      await runSave(btn, API_BASE + '/api/config/model', data);
+    }
+
+    async function savePrompt() {
+      const btn = document.querySelector('#page-prompt button[onclick="savePrompt()"]');
+      const prompt = document.getElementById('promptEditor').value;
+      await runSave(btn, API_BASE + '/api/config/prompt', {prompt: prompt});
+    }
+
+    let chartRange = 30;
+    let balanceChart = null;
+
+    const mockStats = {
+      api_calls_today: 1497,
+      calls_delta_percent: 2.5,
+      balance_used_today: 0.80,
+      balance_total: 8.56,
+      unit: '元',
+      msg_count_today: 328,
+      active_groups: 3
+    };
+
+    function generateMockHistory(days) {
+      const result = { days: [], balance_used: [] };
+      const today = new Date();
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        result.days.push(String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'));
+        const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+        const base = isWeekend ? 0.3 : 0.8;
+        result.balance_used.push(Math.round((base + Math.random() * 0.6) * 100) / 100);
+      }
+      return result;
+    }
+
+    // 用了演示数据必须显式提示，避免把假数据当真（真接口挂掉时）
+    function showDemoBanner(reason) {
+      let el = document.getElementById('demoBanner');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'demoBanner';
+        el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:10px;z-index:9999;' +
+          'background:#fff4e5;border:2px solid #b26a00;color:#7a3e00;border-radius:10px;' +
+          'padding:8px 16px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.12)';
+        document.body.appendChild(el);
+      }
+      el.textContent = '⚠️ 接口不可用，当前显示的是演示数据' + (reason ? '（' + reason + '）' : '');
+    }
+    function hideDemoBanner() {
+      const el = document.getElementById('demoBanner');
+      if (el) el.remove();
+    }
+
+    async function fetchStats() {
+      try {
+        const res = await fetch(API_BASE + '/api/stats');
+        if (!res.ok) throw new Error('API错误 ' + res.status);
+        const data = await res.json();
+        hideDemoBanner();
+        return data;
+      } catch (e) {
+        console.warn('获取真实数据失败，使用演示数据', e);
+        showDemoBanner('统计数据读取失败');
+        return mockStats;
+      }
+    }
+
+    async function fetchHistory(days) {
+      try {
+        const res = await fetch(API_BASE + '/api/history/' + days + 'd');
+        if (!res.ok) throw new Error('API错误 ' + res.status);
+        return await res.json();
+      } catch (e) {
+        console.warn('获取历史数据失败，使用演示数据', e);
+        showDemoBanner('消耗历史读取失败');
+        return generateMockHistory(days);
+      }
+    }
+
+    function renderStats(stats) {
+      document.getElementById('apiCalls').textContent = (stats.api_calls_today != null) ? stats.api_calls_today.toLocaleString() : '--';
+      document.getElementById('deepseekCalls').textContent = (stats.deepseek_calls != null) ? stats.deepseek_calls : '--';
+      document.getElementById('visionCalls').textContent = (stats.vision_calls != null) ? stats.vision_calls : '--';
+      document.getElementById('volcengineCalls').textContent = (stats.volcengine_calls != null) ? stats.volcengine_calls : '--';
+      document.getElementById('websearchCalls').textContent = (stats.websearch_calls != null) ? stats.websearch_calls : '--';
+      // delta标签已移除
+      // delta标签已移除
+
+      document.getElementById('balanceUsed').textContent = stats.balance_total ? stats.balance_total.toFixed(2) : '--';
+      document.getElementById('balanceUsedToday').textContent = (stats.balance_used_today !== undefined && stats.balance_used_today !== null) ? stats.balance_used_today.toFixed(2) : '--';
+      const percent = stats.balance_total ? Math.round((stats.balance_used_today / stats.balance_total) * 100) : 0;
+      // percent标签已移除
+      // 进度条已移除
+
+      // 消息数卡片已移除
+      // 群聊数卡片已移除
+    }
+
+    function renderChart(history) {
+      if (!balanceChart) {
+        balanceChart = echarts.init(document.getElementById('balanceChart'));
+      }
+      const total = history.balance_used.reduce(function(a, b) { return a + b; }, 0).toFixed(2);
+      document.getElementById('chartTotal').textContent = '合计：' + total + ' 元';
+
+      balanceChart.setOption({
+        tooltip: { trigger: 'axis', formatter: '{b}<br/>消耗：{c} 元' },
+        grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+        xAxis: {
+          type: 'category',
+          data: history.days,
+          axisLine: { lineStyle: { color: 'rgba(255,255,255,0.2)' } },
+          axisLabel: { color: 'rgba(255,255,255,0.6)' }
+        },
+        yAxis: {
+          type: 'value',
+          name: '元',
+          axisLine: { lineStyle: { color: 'rgba(255,255,255,0.2)' } },
+          axisLabel: { color: 'rgba(255,255,255,0.6)' },
+          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } }
+        },
+        series: [{
+          name: '余额消耗',
+          type: 'line',
+          smooth: true,
+          data: history.balance_used,
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(139, 92, 246, 0.4)' },
+              { offset: 1, color: 'rgba(139, 92, 246, 0.02)' }
+            ])
+          },
+          lineStyle: { color: '#8b5cf6', width: 2 },
+          itemStyle: { color: '#8b5cf6' },
+          symbol: 'circle',
+          symbolSize: 6
+        }]
+      });
+    }
+
+    async function loadData() {
+      const results = await Promise.all([fetchStats(), fetchHistory(chartRange)]);
+      renderStats(results[0]);
+      renderChart(results[1]);
+    }
+
+    function showModal(title, body, onConfirm, showCancel, animate) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalBody').textContent = body;
+      document.getElementById('modalCancel').style.display = showCancel ? 'inline-block' : 'none';
+      document.getElementById('modalOverlay').style.display = 'flex';
+      // 重新触发动画
+      var card = document.getElementById('modalCard');
+      card.classList.remove('modal-card-anim', 'modal-card-fade', 'closing');
+      card.style.animation = '';
+      card.style.transform = '';
+      void card.offsetWidth; // 强制重排
+      if (animate === false) {
+        card.classList.add('modal-card-fade'); // 只淡入
+      } else {
+        card.classList.add('modal-card-anim'); // 从左下角弹出
+      }
+      function closeModal(callback, popBack) {
+        var overlay = document.getElementById('modalOverlay');
+        var card = document.getElementById('modalCard');
+        overlay.classList.add('closing');
+        if (popBack) {
+          card.classList.add('closing'); // 取消：缩回左下角
+        } else {
+          card.style.animation = 'modalFadeOut 0.25s ease-in forwards'; // 确定：只淡出
+        }
+        setTimeout(function() {
+          overlay.style.display = 'none';
+          overlay.classList.remove('closing');
+          card.classList.remove('closing', 'modal-card-fade');
+          card.style.animation = '';
+          if (callback) callback();
+        }, 250);
+      }
+      document.getElementById('modalConfirm').onclick = function() {
+        closeModal(onConfirm, false); // 确定：只淡出
+      };
+      document.getElementById('modalCancel').onclick = function() {
+        closeModal(null, true); // 取消：缩回左下角
+      };
+    }
+
+    function applyAndRestart() {
+      showModal('重启服务', '确定要重启控制器和AI服务吗？重启后WebUI将短暂不可用（约10秒）。', function() {
+        showModal('重启中', '正在重启控制器和AI服务，预计15秒后自动刷新页面...', null, false, false);
+        // 先重启AI服务（qq-bot）
+        fetch(API_BASE + '/api/restart', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({target: 'ai'})
+        }).catch(() => {});
+        // 再重启控制器自己（会断开连接，忽略错误）
+        setTimeout(() => {
+          fetch(API_BASE + '/api/restart', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target: 'self'})
+          }).catch(() => {});
+        }, 500);
+        setTimeout(() => location.reload(), 15000);
+      }, true);
+    }
+
+    function switchChartRange(days) {
+      chartRange = days;
+      loadData();
+    }
+
+    function exportData() {
+      alert('导出功能开发中...');
+    }
+
+    document.querySelectorAll('.nav-link').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        document.querySelectorAll('.nav-link').forEach(function(l) { l.classList.remove('active'); });
+        link.classList.add('active');
+        const page = link.dataset.page;
+        if (page !== 'dashboard') {
+          Farvist.toast({ title: '功能开发中', message: link.textContent.trim() + ' 页面即将上线', variant: 'info' });
+        }
+      });
+    });
+
+    window.addEventListener('load', function() {
+        loadData();
+    });
+
+    window.addEventListener('resize', function() {
+      if (balanceChart) balanceChart.resize();
+    });
+  </script>
+
+  <!-- 自定义弹窗 -->
+  <style>
+    @keyframes modalPopIn {
+      0% { opacity: 0; transform: translate(-60px, 60px) scale(0.85); }
+      60% { opacity: 1; transform: translate(5px, -5px) scale(1.02); }
+      100% { opacity: 1; transform: translate(0, 0) scale(1); }
+    }
+    @keyframes modalPopOut {
+      0% { opacity: 1; transform: translate(0, 0) scale(1); }
+      100% { opacity: 0; transform: translate(-60px, 60px) scale(0.85); }
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    @keyframes modalFadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; }
+    }
+    .modal-overlay {
+      animation: modalFadeIn 0.2s ease-out;
+    }
+    .modal-overlay.closing {
+      animation: modalFadeOut 0.25s ease-in forwards;
+    }
+    .modal-card-anim {
+      animation: modalPopIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .modal-card-fade {
+      animation: modalFadeIn 0.2s ease-out !important;
+      transform: none !important;
+    }
+    .modal-card-anim.closing {
+      animation: modalPopOut 0.25s ease-in forwards;
+    }
+    .page-content { position: relative; }
+    .page-content.slide-up-out { animation: slideUpOut 0.25s ease-in forwards; }
+    .page-content.slide-up-in { animation: slideUpIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+    @keyframes slideUpOut {
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(-24px); }
+    }
+    @keyframes slideUpIn {
+      from { opacity: 0; transform: translateY(24px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+      /* 下拉菜单深色主题 */
+    select.form-control {
+      background-color: rgba(255,255,255,0.06) !important;
+      color: #e2e8f0 !important;
+      border: 1px solid rgba(255,255,255,0.12) !important;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") !important;
+      background-repeat: no-repeat !important;
+      background-position: right 0.75rem center !important;
+      padding-right: 2rem !important;
+    }
+    select.form-control option {
+      background-color: rgba(30, 27, 75, 0.85) !important;
+      color: #e2e8f0 !important;
+      padding: 0.5rem 0.75rem;
+    }
+    select.form-control option:hover,
+    select.form-control option:checked {
+      background-color: rgba(167, 139, 250, 0.25) !important;
+      color: #fff !important;
+    }
+    /* 自定义下拉组件 - 毛玻璃卡片风格 */
+    .custom-select { position: relative; width: 100%; z-index: 50; }
+    .custom-select-trigger {
+      background: rgba(255,255,255,0.06) !important;
+      border: 1px solid rgba(255,255,255,0.12) !important;
+      border-radius: 0.6rem !important;
+      padding: 0.6rem 0.9rem !important; text-align: left !important; margin-bottom: 0.2rem !important;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #e2e8f0 !important;
+      transition: all 0.2s;
+      list-style: none !important;
+    }
+    .custom-select-trigger:hover {
+      border-color: rgba(167,139,250,0.5) !important;
+      background: rgba(255,255,255,0.09) !important;
+    }
+    .custom-select-trigger.active {
+      border-color: #a78bfa !important;
+      box-shadow: 0 0 0 3px rgba(167,139,250,0.15) !important;
+    }
+    .custom-select-arrow {
+      color: #94a3b8 !important;
+      font-size: 0.7rem;
+      transition: transform 0.2s;
+    }
+    .custom-select-trigger.active .custom-select-arrow {
+      transform: rotate(180deg);
+    }
+    .custom-select-dropdown {
+      position: absolute !important;
+      top: calc(100% + 6px) !important;
+      left: 0 !important;
+      right: 0 !important;
+      background: linear-gradient(135deg, #1e1e2e, #252535) !important;
+      backdrop-filter: blur(20px) !important;
+      -webkit-backdrop-filter: blur(20px) !important;
+      border: 1px solid rgba(255,255,255,0.25) !important;
+      border-radius: 0.75rem !important;
+      overflow: hidden !important;
+      display: none !important;
+      z-index: 999 !important;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4) !important;
+      list-style: none !important;
+      padding: 0.3rem !important;
+    }
+    .custom-select-dropdown.show {
+      display: block !important;
+      animation: dropdownIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    @keyframes dropdownIn {
+      from {
+        opacity: 0;
+        transform: translateY(-12px) scale(0.94);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+    .custom-select-dropdown.hiding {
+      animation: dropdownOut 0.25s ease-in forwards !important;
+    }
+    @keyframes dropdownOut {
+      from {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+      to {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.96);
+      }
+    }
+    .custom-select-option {
+      padding: 0.6rem 0.9rem !important; text-align: left !important; margin-bottom: 0.2rem !important;
+      color: #cbd5e1 !important;
+      cursor: pointer;
+      transition: all 0.15s;
+      border-radius: 0.4rem !important;
+      list-style: none !important;
+      background: transparent !important;
+      text-overflow: clip !important;
+      overflow: visible !important;
+      white-space: nowrap !important; overflow: visible !important; text-overflow: clip !important;
+    }
+    .custom-select-option:hover {
+      background: rgba(255,255,255,0.1) !important;
+      color: #ffffff !important;
+    }
+    .custom-select-option.selected {
+      background: #7c3aed !important;
+      color: #ffffff !important;
+    }
+    .custom-select-option:last-child { margin-bottom: 0 !important; }
+
+    /* 模型管理页面 - 美化开关和单选按钮 */
+    .model-switch {
+      position: relative;
+      width: 44px;
+      height: 24px;
+      display: inline-block;
+    }
+    .model-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .model-switch-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #374151;
+      border-radius: 24px;
+      transition: 0.3s;
+    }
+    .model-switch-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background: white;
+      border-radius: 50%;
+      transition: 0.3s;
+    }
+    .model-switch input:checked + .model-switch-slider {
+      background: #7c3aed;
+    }
+    .model-switch input:checked + .model-switch-slider:before {
+      transform: translateX(20px);
+    }
+    .model-radio {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      padding: 6px 14px;
+      border-radius: 0.5rem;
+      border: 1px solid rgba(255,255,255,0.15);
+      background: #1e1e2e;
+      color: #94a3b8;
+      transition: all 0.2s;
+      user-select: none;
+    }
+    .model-radio:hover {
+      border-color: rgba(167,139,250,0.5);
+      color: #e2e8f0;
+    }
+    .model-radio input {
+      display: none;
+    }
+    .model-radio:has(input:checked) {
+      background: #7c3aed;
+      border-color: #7c3aed;
+      color: white;
+      font-weight: 600;
+    }
+
+    /* 自定义下拉组件 */
+    .custom-select { position: relative; width: 100%; }
+    .custom-select-trigger {
+      width: 100%;
+      background: #1e1e2e;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 0.5rem;
+      padding: 0.55rem 0.85rem;
+      color: #e2e8f0;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.95rem;
+      box-sizing: border-box;
+    }
+    .custom-select-trigger:hover { border-color: rgba(167,139,250,0.5); }
+    .custom-select-trigger.active { border-color: #a78bfa; box-shadow: 0 0 0 3px rgba(167,139,250,0.15); }
+    .custom-select-arrow { color: #94a3b8; font-size: 0.7rem; transition: transform 0.2s; }
+    .custom-select-trigger.active .custom-select-arrow { transform: rotate(180deg); }
+    .custom-select-dropdown {
+      position: fixed;
+      z-index: 99999 !important;
+      margin-top: 4px;
+      background: #252535 !important;
+      border: 1px solid rgba(255,255,255,0.25) !important;
+      border-radius: 0.6rem;
+      padding: 0.4rem;
+      display: none;
+      z-index: 999 !important;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .custom-select-dropdown.show {
+      display: block;
+      animation: dropdownIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .custom-select-dropdown.hiding {
+      display: block;
+      animation: dropdownOut 0.25s ease-in forwards;
+    }
+    @keyframes dropdownIn {
+      from { opacity: 0; transform: translateY(-12px) scale(0.94); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes dropdownOut {
+      from { opacity: 1; transform: translateY(0) scale(1); }
+      to { opacity: 0; transform: translateY(-12px) scale(0.94); }
+    }
+    .custom-select-option {
+      padding: 0.5rem 0.75rem;
+      color: #cbd5e1;
+      cursor: pointer;
+      border-radius: 0.4rem;
+      font-size: 0.95rem;
+    }
+    .custom-select-option:hover { background: rgba(255,255,255,0.08); color: #e2e8f0; }
+    .custom-select-option.selected { background: #7c3aed; color: #fff; font-weight: 700; }
+    .custom-select-option:last-child { margin-bottom: 0 !important; }
+
+    select.form-control:focus {
+      border-color: #a78bfa !important;
+      box-shadow: 0 0 0 3px rgba(167,139,250,0.15) !important;
+    }
+</style>
+  <div class="modal-overlay" id="modalOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); backdrop-filter:blur(4px); z-index:9999; align-items:center; justify-content:center;">
+    <div class="modal-card modal-card-anim" id="modalCard" style="background:rgba(20,20,30,.95); border:1px solid rgba(255,255,255,.1); border-radius:16px; padding:24px; min-width:320px; max-width:90vw; box-shadow:0 20px 60px rgba(0,0,0,.5);">
+      <div class="modal-title" id="modalTitle" style="font-size:1.1rem; font-weight:700; margin-bottom:12px;">提示</div>
+      <div class="modal-body" id="modalBody" style="color:rgba(255,255,255,.7); margin-bottom:20px; line-height:1.6;"></div>
+      <div class="modal-actions" style="display:flex; gap:10px; justify-content:flex-end;">
+        <button class="btn btn-glass btn-sm" id="modalCancel" style="display:none;">取消</button>
+        <button class="btn btn-gradient-primary btn-sm" id="modalConfirm">确定</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

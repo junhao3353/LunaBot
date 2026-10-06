@@ -21,5 +21,9 @@ COPY requirements-controller.txt ./
 RUN pip install --no-cache-dir -r requirements-controller.txt
 
 COPY QQ_Controller.py ./
+COPY webui-dashboard.html ./
+
+# WebUI（配置界面）端口
+EXPOSE 6650
 
 CMD ["python", "-u", "QQ_Controller.py"]

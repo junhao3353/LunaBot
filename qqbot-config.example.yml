@@ -124,6 +124,8 @@ douyin_job_timeout: 300
 # 可选：把解析服务的 media-data 卷挂到本容器后填这里（如 /dtk_media）
 # 填了可直接读文件（省一次HTTP传输）；留空则通过 API /downloads/{id}/files/{name} 取回
 douyin_media_dir: ""
+# 单个抖音文件下载上限（MB）
+media_max_mb: 200
 
 # ---------- 发送方式 ----------
 send_file_as_chat_msg: false
@@ -163,3 +165,10 @@ controller:
   container_ai: "qq-bot"
   container_napcat: "qq-napcat"
   container_self: "qq-controller"
+  # ---------- WebUI（配置界面，第一版只有仪表盘） ----------
+  webui_enabled: true
+  webui_port: 6650
+  # 访问令牌：留空=每次启动自动生成并打印在日志里；建议固定写一个值
+  webui_token: ""
+  # 统计数据文件（主程序写入，用于仪表盘统计；暂未接入时显示0）
+  stats_file: "/data/stats.json"
